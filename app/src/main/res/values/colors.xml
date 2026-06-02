@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="kol_blue_700">#185BE6</color>
+    <color name="kol_blue_500">#2D7BFF</color>
+    <color name="kol_blue_300">#53B8FF</color>
+    <color name="kol_blue_100">#EAF4FF</color>
+    <color name="kol_navy_900">#0B1E4D</color>
+    <color name="kol_ink_900">#10233F</color>
+    <color name="kol_ink_700">#47607C</color>
+    <color name="kol_ink_500">#6E84A1</color>
+    <color name="kol_surface">#F7FBFF</color>
+    <color name="kol_surface_alt">#FFFFFF</color>
+    <color name="kol_surface_soft">#EEF6FF</color>
+    <color name="kol_line">#D7E6F7</color>
+    <color name="kol_success">#1DAA78</color>
+    <color name="kol_warning">#D98A20</color>
+    <color name="kol_error">#E04646</color>
+    <color name="kol_shadow">#140F2746</color>
+</resources>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.VoiceAssistant" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/kol_blue_500</item>
+        <item name="colorPrimaryContainer">@color/kol_blue_100</item>
+        <item name="colorOnPrimary">@color/kol_surface_alt</item>
+        <item name="colorSecondary">@color/kol_blue_300</item>
+        <item name="colorSecondaryContainer">@color/kol_surface_soft</item>
+        <item name="colorSurface">@color/kol_surface_alt</item>
+        <item name="colorOnSurface">@color/kol_ink_900</item>
+        <item name="colorSurfaceVariant">@color/kol_surface_soft</item>
+        <item name="colorOnSurfaceVariant">@color/kol_ink_700</item>
+        <item name="android:colorBackground">@color/kol_surface</item>
+        <item name="android:windowBackground">@color/kol_surface</item>
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+    </style>
+</resources>

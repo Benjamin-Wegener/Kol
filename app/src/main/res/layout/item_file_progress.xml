@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingHorizontal="10dp"
+    android:paddingVertical="10dp"
+    android:background="@drawable/kol_panel_background">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="4dp">
+
+        <!-- Status icon: ○ pending, ↓ downloading, ✓ done, ✗ error -->
+        <TextView
+            android:id="@+id/tvFileIcon"
+            android:layout_width="18dp"
+            android:layout_height="wrap_content"
+            android:text="○"
+            android:textSize="12sp"
+            android:textColor="@color/kol_ink_500"
+            android:layout_marginEnd="8dp"/>
+
+        <TextView
+            android:id="@+id/tvFileName"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textSize="12sp"
+            android:textColor="@color/kol_ink_700"
+            android:singleLine="true"
+            android:ellipsize="middle"/>
+
+        <TextView
+            android:id="@+id/tvFileSize"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="11sp"
+            android:textColor="@color/kol_ink_500"
+            android:layout_marginStart="8dp"/>
+    </LinearLayout>
+
+    <ProgressBar
+        android:id="@+id/progressFile"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="3dp"
+        android:max="100"
+        android:progress="0"
+        android:progressTint="@color/kol_blue_500"
+        android:progressBackgroundTint="@color/kol_line"
+        android:visibility="gone"/>
+
+</LinearLayout>

@@ -1,27 +1,81 @@
-# Compiled class file
-*.class
+# Gradle build files
+.gradle/
+build/
+*/*.jar
+*/*.aar
+*/*.kotlin_module
 
-# Log file
+# Android Studio / Intellij IDEA workspace
+.idea/
+*.iml
+*.iws
+*.ipr
+*.iuser
+
+# Local configuration file
+local.properties
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Android Studio
+captures/
 *.log
 
-# BlueJ files
-*.ctxt
+# Native code generation
+generated/
 
-# Mobile Tools for Java (J2ME)
-.mtj.tmp/
+# External native build (Android)
+.externalNativeBuild/
 
-# Package Files #
-*.jar
-*.war
-*.nar
-*.ear
-*.zip
-*.tar.gz
-*.rar
+# Android Profiling / Coverage
+*.profiling
+*.coverage
 
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
-hs_err_pid*
-replay_pid*
+# Gradle wrapper (optional - keep if you want to exclude it)
+# gradlew.bat
 
-# Kotlin Gradle plugin data, see https://kotlinlang.org/docs/whatsnew20.html#new-directory-for-kotlin-data-in-gradle-projects
-.kotlin/
+# ── GSD baseline (auto-generated) ──
+.gsd
+.gsd-id
+.mcp.json
+.bg-shell/
+.agents/
+.idea/
+META-INF/
+logo_v1.png-autosave.kra
+third_party/llama-build-android-arm64/
+third_party/sherpa-onnx/build-android-arm64-v8a/
+nul
+nul.*
+con
+con.*
+prn
+prn.*
+aux
+aux.*
+com[1-9]
+com[1-9].*
+lpt[1-9]
+lpt[1-9].*
+*.swp
+*.swo
+*~
+.vscode/
+*.code-workspace
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+dist/
+__pycache__/
+*.pyc
+.venv/
+venv/
+target/
+vendor/
+coverage/
+.cache/
+tmp/

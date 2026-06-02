@@ -1,0 +1,107 @@
+plugins {
+    id 'com.android.application'
+    id 'kotlin-android'
+}
+
+android {
+    namespace 'com.voiceassistant'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.voiceassistant"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Enable 16KB alignment for release builds
+            ndk {
+                debugSymbolLevel 'NONE'
+            }
+        }
+        debug {
+            // Enable 16KB alignment for debug builds
+            ndk {
+                debugSymbolLevel 'FULL'
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    buildFeatures {
+        viewBinding true
+    }
+
+    // Allow large model assets
+    aaptOptions {
+        noCompress "gguf", "onnx", "bin"
+    }
+
+    packagingOptions {
+        pickFirst 'lib/arm64-v8a/libc++_shared.so'
+        exclude 'META-INF/DEPENDENCIES'
+        exclude 'META-INF/LICENSE'
+        exclude 'META-INF/LICENSE.txt'
+        exclude 'META-INF/NOTICE'
+        exclude 'META-INF/NOTICE.txt'
+        // Compress native libs for 16KB compatibility with this AGP/packaging setup
+        doNotStrip '**/*.so'
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+
+    // Disable Jetifier for Java 21 compatibility
+}
+
+def sherpaBuildScript = rootProject.file("scripts/build-sherpa-onnx-arm64.sh")
+def llamaBuildScript = rootProject.file("scripts/build-llama-android-arm64.sh")
+
+tasks.register("buildSherpaOnnxArm64", Exec) {
+    group = "build"
+    description = "Build sherpa-onnx native libraries for arm64-v8a and copy them into jniLibs."
+    workingDir rootProject.projectDir
+    commandLine "bash", sherpaBuildScript.absolutePath
+}
+
+tasks.register("buildLlamaAndroidArm64", Exec) {
+    group = "build"
+    description = "Build llama.cpp native libraries for arm64-v8a and copy them into jniLibs."
+    workingDir rootProject.projectDir
+    commandLine "bash", llamaBuildScript.absolutePath
+}
+
+preBuild.dependsOn tasks.named("buildSherpaOnnxArm64")
+preBuild.dependsOn tasks.named("buildLlamaAndroidArm64")
+
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+    implementation 'androidx.activity:activity-ktx:1.8.2'
+    implementation 'androidx.fragment:fragment-ktx:1.6.2'
+
+    // Sherpa-ONNX: STT (Whisper tiny) + TTS (Kokoro/Piper) + VAD (Silero)
+    implementation files("libs/sherpa-onnx.aar")
+
+}
