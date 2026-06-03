@@ -312,14 +312,13 @@ class GemmaLiteRtInference(private val context: Context) {
             withoutThinking
         }
 
-        val markerMatch = Regex("^\\[lang=([a-zA-Z-]{2,8})\\]").find(afterUser)
-        val language = markerMatch?.groupValues?.getOrNull(1)?.lowercase()
-        val waitingForPrefixCompletion = markerMatch == null &&
-            withoutThinking.startsWith("[") &&
-            !withoutThinking.contains("]")
+        val consumedLanguageTags = consumeLeadingLanguageTags(afterUser)
+        val language = consumedLanguageTags.language
+        val waitingForPrefixCompletion = consumedLanguageTags.waitingForTag ||
+            (language == null && withoutThinking.startsWith("[") && !withoutThinking.contains("]"))
         val userText = userMatch?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
         val visibleCandidate = when {
-            markerMatch != null -> afterUser.removeRange(markerMatch.range).trimStart()
+            language != null -> consumedLanguageTags.remaining
             waitingForPrefixCompletion -> ""
             afterUser.startsWith("[lang") -> ""
             else -> afterUser
@@ -338,5 +337,38 @@ class GemmaLiteRtInference(private val context: Context) {
             current = current.substring(closingBracket + 1).trimStart()
         }
         return current
+    }
+
+    private data class ConsumedLanguageTags(
+        val language: String?,
+        val remaining: String,
+        val waitingForTag: Boolean
+    )
+
+    private fun consumeLeadingLanguageTags(text: String): ConsumedLanguageTags {
+        var current = text.trimStart()
+        var language: String? = null
+        var consumedAny = false
+        val completeTag = Regex(
+            "^\\s*\\[?\\s*lang\\s*=?\\s*([a-zA-Z]{2,3})(?:\\s*\\])?(?=\\s|$|[A-ZÄÖÜ])",
+            RegexOption.IGNORE_CASE
+        )
+
+        while (true) {
+            val match = completeTag.find(current) ?: break
+            language = match.groupValues[1].lowercase()
+            current = current.substring(match.range.last + 1).trimStart()
+            consumedAny = true
+        }
+
+        val waitingForTag = consumedAny &&
+            Regex("^\\s*\\[?\\s*lang(?:\\s*=\\s*)?[a-zA-Z]{0,3}\\s*$", RegexOption.IGNORE_CASE)
+                .matches(current)
+
+        return ConsumedLanguageTags(
+            language = language,
+            remaining = if (waitingForTag) "" else current,
+            waitingForTag = waitingForTag
+        )
     }
 }

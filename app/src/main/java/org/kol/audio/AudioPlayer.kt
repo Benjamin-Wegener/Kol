@@ -35,7 +35,7 @@ class AudioPlayer {
             sampleRate,
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(4096)
+        ).coerceAtLeast(4096) * 4
 
         audioTrack = AudioTrack.Builder()
             .setAudioAttributes(

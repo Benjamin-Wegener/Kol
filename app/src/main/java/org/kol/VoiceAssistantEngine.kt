@@ -66,16 +66,21 @@ class VoiceAssistantEngine(private val context: Context) {
     private val gemmaMutex = Mutex()
     private val ttsMutex = Mutex()
     private val llmSentenceQueue = Channel<FloatArray>(Channel.UNLIMITED)
-    private val ttsSentenceQueue = Channel<String>(Channel.UNLIMITED)
+    private val ttsSentenceQueue = Channel<TtsQueueItem>(Channel.UNLIMITED)
 
     private val sentenceBatcher = SentenceBatcher(
         onSentenceReady = { sentence ->
-            ttsSentenceQueue.trySend(sentence)
+            ttsSentenceQueue.trySend(TtsQueueItem.Sentence(sentence))
         }
     )
 
     private var detectedLanguage = "en"
     private var turnCounter = 0L
+
+    private sealed class TtsQueueItem {
+        data class Sentence(val text: String) : TtsQueueItem()
+        object EndOfTurn : TtsQueueItem()
+    }
 
     private suspend fun ensureGemma(): GemmaLiteRtInference? {
         val current = gemma
@@ -229,6 +234,7 @@ class VoiceAssistantEngine(private val context: Context) {
                 onDone = {
                     Log.d(TAG, "turn#$turnId Gemma done; responseBytes=${_response.value.toByteArray().size} responseChars=${_response.value.length}")
                     sentenceBatcher.done()
+                    ttsSentenceQueue.trySend(TtsQueueItem.EndOfTurn)
                     if (_state.value !is State.Speaking) {
                         _state.value = State.Listening
                     }
@@ -310,18 +316,22 @@ class VoiceAssistantEngine(private val context: Context) {
     }
 
     private suspend fun drainTtsQueue() {
-        var pendingAudio: Deferred<Pair<String, FloatArray>>? = null
-        for (sentence in ttsSentenceQueue) {
-            val nextAudio = scope.async(Dispatchers.IO) {
-                synthesizeTtsSentence(sentence)
-            }
-            val previousAudio = pendingAudio
-            pendingAudio = nextAudio
-            if (previousAudio != null) {
-                playSynthesized(previousAudio.await())
+        val synthesizedAudioQueue = Channel<Deferred<Pair<String, FloatArray>>>(capacity = 4)
+        scope.launch {
+            for (item in ttsSentenceQueue) {
+                if (item is TtsQueueItem.Sentence) {
+                    synthesizedAudioQueue.send(
+                        scope.async(Dispatchers.IO) {
+                            synthesizeTtsSentence(item.text)
+                        }
+                    )
+                }
             }
         }
-        pendingAudio?.let { playSynthesized(it.await()) }
+
+        for (audio in synthesizedAudioQueue) {
+            playSynthesized(audio.await())
+        }
     }
 
     private suspend fun synthesizeTtsSentence(sentence: String): Pair<String, FloatArray> {

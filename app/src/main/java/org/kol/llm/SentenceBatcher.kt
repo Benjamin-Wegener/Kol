@@ -14,14 +14,19 @@ import com.voiceassistant.ModelConfig
  */
 class SentenceBatcher(
     private val onSentenceReady: (String) -> Unit,
+    private val firstFlushTokens: Int = 2,
     private val maxTokensBeforeFlush: Int = 40,
-    private val earlyFlushChars: Int = 60,
+    private val earlyFlushMinChars: Int = 45,
+    private val earlyFlushHardCap: Int = 120,
+    private val absoluteHardCap: Int = 180,
     private val minCharsBeforeFlush: Int = 20
 ) {
     private val tag = "SentenceBatcher"
     private val buffer = StringBuilder()
     private var tokenCount = 0
     private val fullResponse = StringBuilder()
+    private var pendingFlush = false
+    private var hasFlushed = false
 
     fun addToken(token: String) {
         buffer.append(token)
@@ -29,15 +34,41 @@ class SentenceBatcher(
         tokenCount++
         Log.d(tag, "addToken token=${token.take(80)} tokenCount=$tokenCount bufferChars=${buffer.length}")
 
-        // Check for sentence-ending punctuation
-        val lastChar = buffer.lastOrNull()
-        val shouldFlush = (lastChar != null && lastChar in ModelConfig.SENTENCE_ENDINGS)
-            || tokenCount >= maxTokensBeforeFlush
-            || (buffer.length >= earlyFlushChars && buffer.length >= minCharsBeforeFlush)
+        val tokenEndsBoundary = token.isNotBlank() && (
+            token.last() in ModelConfig.SENTENCE_ENDINGS ||
+                token.last() in setOf(',', ';', ':', '–', '—') ||
+                token.last().isWhitespace()
+            )
+        val tokenEndsClause = token.isNotBlank() && token.last() in ModelConfig.SENTENCE_ENDINGS
+        val shouldFlush = (!hasFlushed && tokenCount >= firstFlushTokens && buffer.any { it.isLetterOrDigit() })
+            || tokenEndsClause
+            || (tokenCount >= maxTokensBeforeFlush && tokenEndsBoundary)
+            || (buffer.length >= earlyFlushMinChars
+                && buffer.length >= minCharsBeforeFlush
+                && tokenEndsBoundary)
 
         if (shouldFlush) {
             Log.d(tag, "flushing sentence chars=${buffer.length} fullChars=${fullResponse.length}")
             flush()
+            pendingFlush = false
+            return
+        }
+        if (tokenCount >= maxTokensBeforeFlush && !tokenEndsBoundary) {
+            pendingFlush = true
+        }
+        if (!pendingFlush && buffer.length >= earlyFlushHardCap && !tokenEndsBoundary) {
+            pendingFlush = true
+        }
+        if (pendingFlush && tokenEndsBoundary && buffer.length >= earlyFlushHardCap) {
+            Log.d(tag, "pending flush resolved chars=${buffer.length} fullChars=${fullResponse.length}")
+            flush()
+            pendingFlush = false
+            return
+        }
+        if (buffer.length >= absoluteHardCap && tokenEndsBoundary) {
+            Log.d(tag, "absolute cap flush chars=${buffer.length} fullChars=${fullResponse.length}")
+            flush()
+            pendingFlush = false
         }
     }
 
@@ -51,9 +82,10 @@ class SentenceBatcher(
 
     private fun flush() {
         val sentence = buffer.toString().trim()
-        if (sentence.isNotEmpty()) {
+        if (sentence.isNotEmpty() && sentence.any { it.isLetterOrDigit() }) {
             Log.d(tag, "sentenceReady=${sentence.take(120)}")
             onSentenceReady(sentence)
+            hasFlushed = true
         }
         buffer.clear()
         tokenCount = 0
@@ -63,6 +95,8 @@ class SentenceBatcher(
         buffer.clear()
         fullResponse.clear()
         tokenCount = 0
+        pendingFlush = false
+        hasFlushed = false
     }
 
     fun getFullResponse(): String = fullResponse.toString().trim()
