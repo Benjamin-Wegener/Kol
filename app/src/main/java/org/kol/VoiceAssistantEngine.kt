@@ -10,9 +10,7 @@ import com.voiceassistant.llm.SentenceBatcher
 import com.voiceassistant.tts.MultilingualTTS
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -76,6 +74,8 @@ class VoiceAssistantEngine(private val context: Context) {
 
     private var detectedLanguage = "en"
     private var turnCounter = 0L
+    @Volatile
+    private var playbackTicket = 0L
 
     private sealed class TtsQueueItem {
         data class Sentence(val text: String) : TtsQueueItem()
@@ -145,7 +145,7 @@ class VoiceAssistantEngine(private val context: Context) {
                 }
                 scope.launch {
                     Log.d(TAG, "Prewarming multilingual TTS")
-                    ensureTts()
+                    ensureTts()?.warmUp(preferredLanguageCode ?: "de")
                 }
                 scope.launch {
                     drainLlmQueue()
@@ -309,6 +309,7 @@ class VoiceAssistantEngine(private val context: Context) {
      */
     private fun bargeIn() {
         Log.d(TAG, "bargeIn")
+        playbackTicket += 1
         gemma?.cancel()
         player?.flush()
         sentenceBatcher.reset()
@@ -316,21 +317,10 @@ class VoiceAssistantEngine(private val context: Context) {
     }
 
     private suspend fun drainTtsQueue() {
-        val synthesizedAudioQueue = Channel<Deferred<Pair<String, FloatArray>>>(capacity = 4)
-        scope.launch {
-            for (item in ttsSentenceQueue) {
-                if (item is TtsQueueItem.Sentence) {
-                    synthesizedAudioQueue.send(
-                        scope.async(Dispatchers.IO) {
-                            synthesizeTtsSentence(item.text)
-                        }
-                    )
-                }
+        for (item in ttsSentenceQueue) {
+            if (item is TtsQueueItem.Sentence) {
+                playSynthesized(synthesizeTtsSentence(item.text))
             }
-        }
-
-        for (audio in synthesizedAudioQueue) {
-            playSynthesized(audio.await())
         }
     }
 
@@ -360,15 +350,19 @@ class VoiceAssistantEngine(private val context: Context) {
         val micResumeDelayMs = playbackDurationMs + 150L
         capture?.suspendProcessing(micResumeDelayMs)
         _state.value = State.Speaking(spokenSentence)
+        val ticket = playbackTicket + 1
+        playbackTicket = ticket
         var offset = 0
         while (offset < samples.size) {
             val end = (offset + 2048).coerceAtMost(samples.size)
             player?.enqueue(samples.copyOfRange(offset, end))
             offset = end
         }
-        delay(micResumeDelayMs)
-        if (_state.value is State.Speaking) {
-            _state.value = State.Listening
+        scope.launch {
+            delay(micResumeDelayMs)
+            if (playbackTicket == ticket && _state.value is State.Speaking) {
+                _state.value = State.Listening
+            }
         }
     }
 

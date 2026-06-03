@@ -14,7 +14,8 @@ import com.voiceassistant.ModelConfig
  */
 class SentenceBatcher(
     private val onSentenceReady: (String) -> Unit,
-    private val firstFlushTokens: Int = 2,
+    private val firstFlushMinChars: Int = 10,
+    private val firstFlushMaxTokens: Int = 4,
     private val maxTokensBeforeFlush: Int = 40,
     private val earlyFlushMinChars: Int = 45,
     private val earlyFlushHardCap: Int = 120,
@@ -40,7 +41,11 @@ class SentenceBatcher(
                 token.last().isWhitespace()
             )
         val tokenEndsClause = token.isNotBlank() && token.last() in ModelConfig.SENTENCE_ENDINGS
-        val shouldFlush = (!hasFlushed && tokenCount >= firstFlushTokens && buffer.any { it.isLetterOrDigit() })
+        val shouldFlush = (!hasFlushed
+            && tokenCount >= firstFlushMaxTokens
+            && buffer.length >= firstFlushMinChars
+            && tokenEndsBoundary
+            && buffer.any { it.isLetterOrDigit() })
             || tokenEndsClause
             || (tokenCount >= maxTokensBeforeFlush && tokenEndsBoundary)
             || (buffer.length >= earlyFlushMinChars

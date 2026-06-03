@@ -91,7 +91,7 @@ class MultilingualTTS(context: Context) {
             config = GenerationConfig(
                 sid = speakerId,
                 speed = ModelConfig.TTS_SPEED,
-                numSteps = 6,
+                numSteps = ModelConfig.TTS_NUM_STEPS,
                 extra = mapOf("lang" to normalizedLanguage)
             )
         )
@@ -112,6 +112,12 @@ class MultilingualTTS(context: Context) {
     }
 
     val sampleRate: Int get() = tts.sampleRate()
+
+    fun warmUp(language: String = "de") {
+        val startedAt = System.currentTimeMillis()
+        synthesize("Ja.", language)
+        Log.d(TAG, "TTS warm-up completed in ${System.currentTimeMillis() - startedAt}ms")
+    }
 
     fun release() {
         tts.release()

@@ -9,6 +9,8 @@ import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.SamplerConfig
@@ -45,6 +47,7 @@ class GemmaLiteRtInference(private val context: Context) {
         var lastError: Throwable? = null
         for ((label, backend) in backendAttempts) {
             try {
+                enableSpeculativeDecoding()
                 Log.d(tag, "Initializing Gemma LiteRT-LM with backend=$label model=$modelPath")
                 val engineConfig = EngineConfig(
                     modelPath = modelPath,
@@ -86,6 +89,12 @@ class GemmaLiteRtInference(private val context: Context) {
             "Failed to initialize Gemma LiteRT-LM with all backends",
             lastError
         )
+    }
+
+    @OptIn(ExperimentalApi::class)
+    private fun enableSpeculativeDecoding() {
+        ExperimentalFlags.enableSpeculativeDecoding = true
+        Log.d(tag, "LiteRT-LM speculative decoding enabled")
     }
 
     suspend fun generateFromAudio(

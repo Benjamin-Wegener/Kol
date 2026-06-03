@@ -24,6 +24,7 @@ class AudioPlayer {
     private val sampleRate = ModelConfig.TTS_SAMPLE_RATE
     private val audioQueue = Channel<FloatArray>(capacity = Channel.UNLIMITED)
     private val isFlushing = AtomicBoolean(false)
+    private val hasStarted = AtomicBoolean(false)
     private var playJob: Job? = null
     private var audioTrack: AudioTrack? = null
     val isPlaying = AtomicBoolean(false)
@@ -57,8 +58,6 @@ class AudioPlayer {
             .build()
 
         Log.d(tag, "AudioTrack created")
-        audioTrack?.play()
-        Log.d(tag, "AudioTrack started")
 
         playJob = scope.launch {
             for (chunk in audioQueue) {
@@ -68,6 +67,9 @@ class AudioPlayer {
                 val wrote = audioTrack?.write(pcm16, 0, pcm16.size, AudioTrack.WRITE_BLOCKING) ?: 0
                 if (wrote < 0) {
                     Log.e(tag, "AudioTrack write failed code=$wrote chunkSize=${pcm16.size}")
+                } else if (hasStarted.compareAndSet(false, true)) {
+                    audioTrack?.play()
+                    Log.d(tag, "AudioTrack started after first buffered chunk")
                 }
             }
             isPlaying.set(false)
@@ -89,9 +91,9 @@ class AudioPlayer {
         isFlushing.set(true)
         audioTrack?.pause()
         audioTrack?.flush()
+        hasStarted.set(false)
         // Drain the queue
         while (audioQueue.tryReceive().isSuccess) { /* discard */ }
-        audioTrack?.play()
         isFlushing.set(false)
         isPlaying.set(false)
     }
