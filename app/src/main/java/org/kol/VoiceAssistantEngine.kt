@@ -319,51 +319,63 @@ class VoiceAssistantEngine(private val context: Context) {
     private suspend fun drainTtsQueue() {
         for (item in ttsSentenceQueue) {
             if (item is TtsQueueItem.Sentence) {
-                playSynthesized(synthesizeTtsSentence(item.text))
+                synthesizeAndStream(item.text)
             }
         }
     }
 
-    private suspend fun synthesizeTtsSentence(sentence: String): Pair<String, FloatArray> {
+    private suspend fun synthesizeAndStream(sentence: String) {
         val spokenSentence = stripThinkingMarkup(sentence)
         if (spokenSentence.isBlank()) {
-            return spokenSentence to FloatArray(0)
+            return
         }
         val ttsEngine = ensureTts()
         if (ttsEngine == null) {
-            return spokenSentence to FloatArray(0)
-        }
-        val spokenLanguage = preferredLanguageCode ?: detectedLanguage
-        Log.d(TAG, "TTS speak lang=$spokenLanguage text=${spokenSentence.take(120)}")
-        return spokenSentence to ttsEngine.synthesize(spokenSentence, spokenLanguage)
-    }
-
-    private suspend fun playSynthesized(synthesized: Pair<String, FloatArray>) {
-        val (spokenSentence, samples) = synthesized
-        if (spokenSentence.isBlank() || samples.isEmpty()) {
+            _state.value = State.Listening
             return
         }
-        val ttsEngine = ensureTts() ?: return
-        Log.d(TAG, "TTS produced samples=${samples.size} approxMs=${1000.0 * samples.size / ttsEngine.sampleRate}")
-        val playbackDurationMs = ((samples.size * 1000L) / ttsEngine.sampleRate)
-            .coerceAtLeast(250L)
-        val micResumeDelayMs = playbackDurationMs + 150L
-        capture?.suspendProcessing(micResumeDelayMs)
-        _state.value = State.Speaking(spokenSentence)
+        val spokenLanguage = preferredLanguageCode ?: detectedLanguage
         val ticket = playbackTicket + 1
         playbackTicket = ticket
+        val estimatedDurationMs = estimateSpeechDurationMs(spokenSentence)
+        capture?.suspendProcessing(estimatedDurationMs + 500L)
+        _state.value = State.Speaking(spokenSentence)
+        Log.d(TAG, "TTS stream lang=$spokenLanguage text=${spokenSentence.take(120)}")
+        val samples = ttsEngine.synthesizeStreaming(spokenSentence, spokenLanguage) { chunk ->
+            if (playbackTicket != ticket) {
+                return@synthesizeStreaming false
+            }
+            enqueueTtsSamples(chunk)
+            true
+        }
+        if (samples.isEmpty()) {
+            Log.w(TAG, "Streaming TTS produced no samples")
+            _state.value = State.Listening
+            return
+        }
+        val playbackDurationMs = ((samples.size * 1000L) / ttsEngine.sampleRate).coerceAtLeast(250L)
+        Log.d(TAG, "TTS streamed samples=${samples.size} approxMs=${1000.0 * samples.size / ttsEngine.sampleRate}")
+        capture?.suspendProcessing(playbackDurationMs + 150L)
+        scope.launch {
+            delay(playbackDurationMs + 150L)
+            if (playbackTicket == ticket && _state.value is State.Speaking) {
+                _state.value = State.Listening
+            }
+        }
+    }
+
+    private fun enqueueTtsSamples(samples: FloatArray) {
         var offset = 0
         while (offset < samples.size) {
             val end = (offset + 2048).coerceAtMost(samples.size)
             player?.enqueue(samples.copyOfRange(offset, end))
             offset = end
         }
-        scope.launch {
-            delay(micResumeDelayMs)
-            if (playbackTicket == ticket && _state.value is State.Speaking) {
-                _state.value = State.Listening
-            }
-        }
+    }
+
+    private fun estimateSpeechDurationMs(text: String): Long {
+        val words = text.trim().split(Regex("\\s+")).count { it.isNotBlank() }
+        return ((words * 360L) + 400L).coerceAtLeast(900L)
     }
 
     fun clearHistory() {
