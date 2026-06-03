@@ -90,7 +90,7 @@ No markdown, no bullet points, no code unless asked."""
     // TTS
     const val TTS_SAMPLE_RATE     = 44100
     const val TTS_SPEED           = 1.0f
-    const val TTS_NUM_STEPS       = 3
+    const val TTS_NUM_STEPS       = 6
 
     // Sentence batcher — flush to TTS on these chars
     val SENTENCE_ENDINGS = setOf('.', '?', '!', '。', '？', '！', '…')
