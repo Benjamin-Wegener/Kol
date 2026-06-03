@@ -84,7 +84,7 @@ No markdown, no bullet points, no code unless asked."""
 
     // VAD
     const val VAD_THRESHOLD       = 0.5f
-    const val VAD_MIN_SILENCE_MS  = 500   // ms of silence to end utterance
+    const val VAD_MIN_SILENCE_MS  = 350   // ms of silence to end utterance
     const val VAD_SPEECH_PAD_MS   = 300   // ms pre-roll buffer
 
     // TTS
