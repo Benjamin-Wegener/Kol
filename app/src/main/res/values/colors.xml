@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <color name="ic_launcher_background">#FFFFFF</color>
+    <color name="phone_icon_color">#1E88E5</color>
     <color name="kol_blue_700">#185BE6</color>
     <color name="kol_blue_500">#2D7BFF</color>
     <color name="kol_blue_300">#53B8FF</color>
