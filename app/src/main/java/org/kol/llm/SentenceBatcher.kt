@@ -14,7 +14,9 @@ import com.voiceassistant.ModelConfig
  */
 class SentenceBatcher(
     private val onSentenceReady: (String) -> Unit,
-    private val maxTokensBeforeFlush: Int = 40
+    private val maxTokensBeforeFlush: Int = 40,
+    private val earlyFlushChars: Int = 60,
+    private val minCharsBeforeFlush: Int = 20
 ) {
     private val tag = "SentenceBatcher"
     private val buffer = StringBuilder()
@@ -29,8 +31,9 @@ class SentenceBatcher(
 
         // Check for sentence-ending punctuation
         val lastChar = buffer.lastOrNull()
-        val shouldFlush = lastChar != null && lastChar in ModelConfig.SENTENCE_ENDINGS
+        val shouldFlush = (lastChar != null && lastChar in ModelConfig.SENTENCE_ENDINGS)
             || tokenCount >= maxTokensBeforeFlush
+            || (buffer.length >= earlyFlushChars && buffer.length >= minCharsBeforeFlush)
 
         if (shouldFlush) {
             Log.d(tag, "flushing sentence chars=${buffer.length} fullChars=${fullResponse.length}")
