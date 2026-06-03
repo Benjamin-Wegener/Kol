@@ -123,9 +123,9 @@ class MultilingualTTS(context: Context) {
             Log.d(TAG, "Normalized TTS language $language -> $normalizedLanguage")
         }
         val startedAt = System.currentTimeMillis()
-        var firstChunkAt = 0L
-        var callbackChunks = 0
-        var callbackSamples = 0
+        val callback = StreamingTtsCallback(TAG, startedAt) { samples ->
+            onSamples(samples)
+        }
         val result = tts.generateWithConfigAndCallback(
             text = text,
             config = GenerationConfig(
@@ -134,25 +134,12 @@ class MultilingualTTS(context: Context) {
                 numSteps = ModelConfig.TTS_NUM_STEPS,
                 extra = mapOf("lang" to normalizedLanguage)
             ),
-            callback = { samples ->
-                if (samples.isNotEmpty()) {
-                    if (firstChunkAt == 0L) {
-                        firstChunkAt = System.currentTimeMillis()
-                        Log.d(TAG, "First streaming TTS chunk in ${firstChunkAt - startedAt}ms samples=${samples.size}")
-                    }
-                    callbackChunks++
-                    callbackSamples += samples.size
-                    if (!onSamples(samples.copyOf())) {
-                        return@generateWithConfigAndCallback 0
-                    }
-                }
-                1
-            }
+            callback = callback
         )
         val durationMs = System.currentTimeMillis() - startedAt
         Log.d(
             TAG,
-            "Streaming generated ${result.samples.size} samples in ${durationMs}ms chunks=$callbackChunks callbackSamples=$callbackSamples sampleRate=${result.sampleRate} lang=$normalizedLanguage sid=$speakerId"
+            "Streaming generated ${result.samples.size} samples in ${durationMs}ms chunks=${callback.callbackChunks} callbackSamples=${callback.callbackSamples} sampleRate=${result.sampleRate} lang=$normalizedLanguage sid=$speakerId"
         )
         return result.samples
     }
