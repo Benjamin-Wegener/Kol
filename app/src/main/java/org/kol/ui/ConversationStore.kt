@@ -90,6 +90,7 @@ class ConversationStore(context: Context) {
                         id = msg.getLong("id"),
                         isUser = msg.getBoolean("isUser"),
                         text = msg.getString("text"),
+                        timestampMs = msg.optLong("timestampMs", System.currentTimeMillis()),
                         isStreaming = msg.optBoolean("isStreaming", false)
                     )
                 )
@@ -117,6 +118,7 @@ class ConversationStore(context: Context) {
                     .put("id", message.id)
                     .put("isUser", message.isUser)
                     .put("text", message.text)
+                    .put("timestampMs", message.timestampMs)
                     .put("isStreaming", message.isStreaming)
             )
         }

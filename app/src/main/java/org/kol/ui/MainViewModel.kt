@@ -29,6 +29,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var activeConversationMeta: ConversationRecord? = null
     private var userMessageId = 1L
     private var assistantMessageId = 2L
+    private var activeAssistantMessageId: Long? = null
     private var lastUserText = ""
     private var lastAssistantText = ""
     private var pendingSaveJob: Job? = null
@@ -68,6 +69,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _chatMessages.value = emptyList()
         lastUserText = ""
         lastAssistantText = ""
+        activeAssistantMessageId = null
         val record = ConversationRecord(id = activeConversationId, title = "New chat", messages = emptyList())
         saveConversation(record, immediate = true)
     }
@@ -78,7 +80,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val updated = _chatMessages.value + ChatMessage(
             id = userMessageId++,
             isUser = true,
-            text = text
+            text = text,
+            timestampMs = System.currentTimeMillis()
         )
         _chatMessages.value = updated
         saveConversation(currentRecord(updated))
@@ -88,16 +91,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (text.isBlank()) return
         lastAssistantText = text
         val current = _chatMessages.value.toMutableList()
-        val existingIndex = current.indexOfLast { !it.isUser }
+        val existingIndex = activeAssistantMessageId?.let { id ->
+            current.indexOfLast { it.id == id }
+        } ?: -1
         if (existingIndex >= 0) {
             current[existingIndex] = current[existingIndex].copy(text = text, isStreaming = true)
         } else {
-            current += ChatMessage(
+            val message = ChatMessage(
                 id = assistantMessageId++,
                 isUser = false,
                 text = text,
+                timestampMs = System.currentTimeMillis(),
                 isStreaming = true
             )
+            current += message
+            activeAssistantMessageId = message.id
         }
         _chatMessages.value = current
         saveConversation(currentRecord(current))
@@ -105,13 +113,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun finishAssistantMessage() {
         val current = _chatMessages.value.toMutableList()
-        val existingIndex = current.indexOfLast { !it.isUser }
+        val existingIndex = activeAssistantMessageId?.let { id ->
+            current.indexOfLast { it.id == id }
+        } ?: -1
         if (existingIndex >= 0) {
             current[existingIndex] = current[existingIndex].copy(isStreaming = false)
             _chatMessages.value = current
             saveConversation(currentRecord(current), immediate = true)
         }
         lastAssistantText = ""
+        activeAssistantMessageId = null
     }
 
     fun selectConversation(conversationId: String) {
@@ -169,5 +180,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun syncIdsFromMessages(messages: List<ChatMessage>) {
         userMessageId = (messages.maxOfOrNull { it.id } ?: 0L) + 1
         assistantMessageId = userMessageId + 1
+        activeAssistantMessageId = messages.lastOrNull { !it.isUser && it.isStreaming }?.id
     }
 }

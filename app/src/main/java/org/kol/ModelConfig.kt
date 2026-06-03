@@ -76,9 +76,11 @@ Be concise by default, but give a fuller answer when the user asks for one or th
 No markdown, no bullet points, no code unless asked."""
     }
 
+    fun systemPromptForLog(preferredLanguage: String? = null): String = systemPrompt(preferredLanguage)
+
     // STT
-    const val WHISPER_SAMPLE_RATE = 16000
-    const val WHISPER_CHUNK_SIZE  = 512   // frames per chunk
+    const val STT_SAMPLE_RATE = 16000
+    const val STT_CHUNK_SIZE  = 512   // frames per chunk
 
     // VAD
     const val VAD_THRESHOLD       = 0.5f

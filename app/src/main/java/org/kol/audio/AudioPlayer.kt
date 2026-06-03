@@ -56,12 +56,9 @@ class AudioPlayer {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
 
-        Log.d(
-            tag,
-            "AudioTrack created sampleRate=$sampleRate bufferSize=$bufferSize state=${audioTrack?.state}"
-        )
+        Log.d(tag, "AudioTrack created")
         audioTrack?.play()
-        Log.d(tag, "AudioTrack play() called playState=${audioTrack?.playState}")
+        Log.d(tag, "AudioTrack started")
 
         playJob = scope.launch {
             for (chunk in audioQueue) {
@@ -71,11 +68,6 @@ class AudioPlayer {
                 val wrote = audioTrack?.write(pcm16, 0, pcm16.size, AudioTrack.WRITE_BLOCKING) ?: 0
                 if (wrote < 0) {
                     Log.e(tag, "AudioTrack write failed code=$wrote chunkSize=${pcm16.size}")
-                } else {
-                    Log.d(
-                        tag,
-                        "AudioTrack wrote=$wrote/${pcm16.size} playState=${audioTrack?.playState} head=${audioTrack?.playbackHeadPosition}"
-                    )
                 }
             }
             isPlaying.set(false)
@@ -95,7 +87,6 @@ class AudioPlayer {
      */
     fun flush() {
         isFlushing.set(true)
-        Log.d(tag, "Flushing playback queue")
         audioTrack?.pause()
         audioTrack?.flush()
         // Drain the queue
@@ -108,7 +99,7 @@ class AudioPlayer {
     fun stop() {
         playJob?.cancel()
         audioTrack?.let {
-            Log.d(tag, "Stopping AudioTrack state=${it.state} playState=${it.playState}")
+            Log.d(tag, "Stopping AudioTrack")
             it.stop()
             it.release()
         }

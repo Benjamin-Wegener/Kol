@@ -1,5 +1,6 @@
 package com.voiceassistant.llm
 
+import android.util.Log
 import com.voiceassistant.ModelConfig
 
 /**
@@ -15,6 +16,7 @@ class SentenceBatcher(
     private val onSentenceReady: (String) -> Unit,
     private val maxTokensBeforeFlush: Int = 40
 ) {
+    private val tag = "SentenceBatcher"
     private val buffer = StringBuilder()
     private var tokenCount = 0
     private val fullResponse = StringBuilder()
@@ -23,6 +25,7 @@ class SentenceBatcher(
         buffer.append(token)
         fullResponse.append(token)
         tokenCount++
+        Log.d(tag, "addToken token=${token.take(80)} tokenCount=$tokenCount bufferChars=${buffer.length}")
 
         // Check for sentence-ending punctuation
         val lastChar = buffer.lastOrNull()
@@ -30,6 +33,7 @@ class SentenceBatcher(
             || tokenCount >= maxTokensBeforeFlush
 
         if (shouldFlush) {
+            Log.d(tag, "flushing sentence chars=${buffer.length} fullChars=${fullResponse.length}")
             flush()
         }
     }
@@ -37,6 +41,7 @@ class SentenceBatcher(
     /** Call when LLM generation is done — flushes remaining text */
     fun done() {
         if (buffer.isNotBlank()) {
+            Log.d(tag, "done() flushing tail chars=${buffer.length}")
             flush()
         }
     }
@@ -44,6 +49,7 @@ class SentenceBatcher(
     private fun flush() {
         val sentence = buffer.toString().trim()
         if (sentence.isNotEmpty()) {
+            Log.d(tag, "sentenceReady=${sentence.take(120)}")
             onSentenceReady(sentence)
         }
         buffer.clear()

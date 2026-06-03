@@ -24,7 +24,7 @@ class VadDetector(context: Context) {
             threshold = ModelConfig.VAD_THRESHOLD,
             minSilenceDuration = ModelConfig.VAD_MIN_SILENCE_MS / 1000f,
             minSpeechDuration = 0.1f,
-            windowSize = ModelConfig.WHISPER_CHUNK_SIZE,
+            windowSize = ModelConfig.STT_CHUNK_SIZE,
             maxSpeechDuration = 30f
         )
 
@@ -34,7 +34,7 @@ class VadDetector(context: Context) {
             selectedProvider = provider
             val vadConfig = VadModelConfig(
                 sileroVadModelConfig = sileroConfig,
-                sampleRate = ModelConfig.WHISPER_SAMPLE_RATE,
+                sampleRate = ModelConfig.STT_SAMPLE_RATE,
                 numThreads = 1,
                 provider = provider,
                 debug = false

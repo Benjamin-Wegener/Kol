@@ -21,7 +21,8 @@ import kotlinx.coroutines.sync.withLock
 /**
  * Orchestrates the full pipeline:
  *
- *   Mic → VAD → Gemma 4 E2B (LiteRT-LM) → SentenceBatcher → multilingual TTS → Speaker
+ *   Mic → VAD → Gemma 4 E2B (LiteRT-LM) →
+ *   SentenceBatcher → multilingual TTS → Speaker
  *
  * Barge-in: VAD fires during TTS playback → cancel LLM + flush audio → new utterance
  */
@@ -67,12 +68,12 @@ class VoiceAssistantEngine(private val context: Context) {
 
     private val sentenceBatcher = SentenceBatcher(
         onSentenceReady = { sentence ->
-            Log.d(TAG, "Sentence ready for TTS: $sentence")
             ttsSentenceQueue.trySend(sentence)
         }
     )
 
     private var detectedLanguage = "en"
+    private var turnCounter = 0L
 
     private suspend fun ensureGemma(): GemmaLiteRtInference? {
         val current = gemma
@@ -154,6 +155,7 @@ class VoiceAssistantEngine(private val context: Context) {
 
     private fun onUtteranceSegmentReady(samples: FloatArray) {
         if (samples.isNotEmpty()) {
+            Log.d(TAG, "onUtteranceSegmentReady samples=${samples.size} approxMs=${1000.0 * samples.size / ModelConfig.STT_SAMPLE_RATE}")
             llmSentenceQueue.trySend(samples)
         }
     }
@@ -171,35 +173,42 @@ class VoiceAssistantEngine(private val context: Context) {
     }
 
     private fun onUtteranceReady(samples: FloatArray) {
+        Log.d(TAG, "onUtteranceReady samples=${samples.size} approxMs=${1000.0 * samples.size / ModelConfig.STT_SAMPLE_RATE}")
         llmSentenceQueue.trySend(samples)
     }
 
     private suspend fun drainLlmQueue() {
         for (samples in llmSentenceQueue) {
+            Log.d(TAG, "drainLlmQueue received samples=${samples.size}")
             processUtterance(samples)
         }
     }
 
     private suspend fun processUtterance(samples: FloatArray) {
         try {
-            val wavBytes = toWavBytes(samples, ModelConfig.WHISPER_SAMPLE_RATE)
-            Log.d(TAG, "Audio utterance ready bytes=${wavBytes.size}")
+            turnCounter += 1
+            val turnId = turnCounter
+            val wavBytes = toWavBytes(samples, ModelConfig.STT_SAMPLE_RATE)
+            Log.d(TAG, "turn#$turnId audio ready samples=${samples.size} bytes=${wavBytes.size} durationMs=${1000.0 * samples.size / ModelConfig.STT_SAMPLE_RATE}")
+            Log.d(TAG, "turn#$turnId audio sample preview=${samples.take(8)} ... ${samples.takeLast(8)}")
 
             _state.value = State.Thinking("")
             _response.value = ""
             sentenceBatcher.reset()
+            Log.d(TAG, "turn#$turnId starting new assistant turn")
 
             val currentGemma = ensureGemma()
             if (currentGemma == null) {
-                _response.value = "LLM unavailable on this build."
-                _state.value = State.Listening
+                Log.w(TAG, "Gemma LiteRT-LM unavailable on demand; keeping existing model file and continuing without LLM")
+                _state.value = State.Error("repair_required:gemma")
                 return
             }
 
+            Log.d(TAG, "turn#$turnId calling Gemma generateFromAudio")
             currentGemma.generateFromAudio(
                 audioWavBytes = wavBytes,
                 onToken = { token ->
-                    Log.d(TAG, "LLM token: ${token.take(40)}")
+                    Log.d(TAG, "turn#$turnId GEMMA TOKEN: ${token.take(120)}")
                     val current = _response.value + token
                     _response.value = current
                     _state.value = State.Thinking(current)
@@ -208,23 +217,22 @@ class VoiceAssistantEngine(private val context: Context) {
                 onUserText = { userText ->
                     if (userText.isNotBlank()) {
                         _transcript.value = userText
-                        Log.d(TAG, "Gemma user transcript=$userText")
+                        Log.d(TAG, "turn#$turnId GEMMA USER TRANSCRIPT=$userText")
                     }
                 },
                 onLanguage = { language ->
                     detectedLanguage = preferredLanguageCode ?: language
-                    Log.d(TAG, "Gemma response language=$language")
+                    Log.d(TAG, "turn#$turnId GEMMA LANGUAGE=$language")
                 },
                 onDone = {
-                    Log.d(TAG, "LLM done; flushing remaining response")
+                    Log.d(TAG, "turn#$turnId Gemma done; responseBytes=${_response.value.toByteArray().size} responseChars=${_response.value.length}")
                     sentenceBatcher.done()
-                    val fullResponse = sentenceBatcher.getFullResponse()
-                    Log.d(TAG, "LLM full response length=${fullResponse.length}")
                     if (_state.value !is State.Speaking) {
                         _state.value = State.Listening
                     }
                 }
             )
+            currentGemma.clearHistory()
         } catch (e: Exception) {
             Log.e(TAG, "Pipeline error", e)
             _state.value = State.Error(e.message ?: "Unknown error")
@@ -246,13 +254,11 @@ class VoiceAssistantEngine(private val context: Context) {
     private suspend fun synthesizeAndPlay(sentence: String) {
         val spokenSentence = stripThinkingMarkup(sentence)
         if (spokenSentence.isBlank()) {
-            Log.d(TAG, "Skipping empty/non-spoken sentence")
             return
         }
         if (spokenSentence != sentence) {
-            Log.d(TAG, "Filtered sentence for TTS: $spokenSentence")
+            Log.d(TAG, "Filtered TTS text")
         }
-        Log.d(TAG, "Synthesizing sentence: $spokenSentence")
         try {
             val ttsEngine = ensureTts()
             if (ttsEngine == null) {
@@ -261,14 +267,14 @@ class VoiceAssistantEngine(private val context: Context) {
                 return
             }
             val spokenLanguage = preferredLanguageCode ?: detectedLanguage
+            Log.d(TAG, "TTS speak lang=$spokenLanguage text=${spokenSentence.take(120)}")
             val samples = ttsEngine.synthesize(spokenSentence, spokenLanguage)
             if (samples.isNotEmpty()) {
+                Log.d(TAG, "TTS produced samples=${samples.size} approxMs=${1000.0 * samples.size / ttsEngine.sampleRate}")
                 val playbackDurationMs = ((samples.size * 1000L) / ttsEngine.sampleRate)
                     .coerceAtLeast(250L)
                 val micResumeDelayMs = playbackDurationMs + 500L
-                Log.d(TAG, "TTS produced ${samples.size} samples for language=$spokenLanguage")
                 capture?.suspendProcessing(micResumeDelayMs)
-                Log.d(TAG, "Suspending mic/VAD for ${micResumeDelayMs}ms during playback")
                 _state.value = State.Speaking(spokenSentence)
                 var offset = 0
                 while (offset < samples.size) {
@@ -276,7 +282,6 @@ class VoiceAssistantEngine(private val context: Context) {
                     player?.enqueue(samples.copyOfRange(offset, end))
                     offset = end
                 }
-                Log.d(TAG, "Queued ${samples.size} samples to AudioPlayer")
                 delay(micResumeDelayMs)
                 if (_state.value is State.Speaking) {
                     _state.value = State.Listening
@@ -295,6 +300,7 @@ class VoiceAssistantEngine(private val context: Context) {
      * Barge-in: user interrupted. Cancel LLM, flush audio immediately.
      */
     private fun bargeIn() {
+        Log.d(TAG, "bargeIn")
         gemma?.cancel()
         player?.flush()
         sentenceBatcher.reset()
@@ -329,7 +335,6 @@ class VoiceAssistantEngine(private val context: Context) {
 
     private fun stripThinkingMarkup(text: String): String {
         if (text.contains(Regex("(?i)<think")) && !text.contains(Regex("(?i)</think>"))) {
-            Log.d(TAG, "Dropping incomplete thinking block before TTS")
             return ""
         }
         var result = text

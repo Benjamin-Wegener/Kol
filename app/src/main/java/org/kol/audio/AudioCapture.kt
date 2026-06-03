@@ -6,6 +6,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
+import android.util.Log
 import com.voiceassistant.ModelConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,7 +18,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Continuously captures mic audio, applies AEC + NS, runs Silero VAD.
- * Emits utterance-complete float arrays ready for Whisper.
+ * Emits utterance-complete float arrays ready for STT.
  *
  * Uses VOICE_COMMUNICATION audio source → hardware AEC so TTS playback
  * doesn't trigger VAD (barge-in without echo artifacts).
@@ -29,7 +30,8 @@ class AudioCapture(
     private val onSpeechStart: () -> Unit,
     private val onSpeechEnd: () -> Unit
 ) {
-    private val sampleRate = ModelConfig.WHISPER_SAMPLE_RATE
+    private val tag = "AudioCapture"
+    private val sampleRate = ModelConfig.STT_SAMPLE_RATE
     private val channelConfig = AudioFormat.CHANNEL_IN_MONO
     private val encoding = AudioFormat.ENCODING_PCM_16BIT
 
@@ -53,6 +55,7 @@ class AudioCapture(
     private val speechBuffer = mutableListOf<Short>()
 
     private val scope = CoroutineScope(Dispatchers.IO)
+    private var utteranceCounter = 0L
 
     @SuppressLint("MissingPermission")
     fun start() {
@@ -79,14 +82,14 @@ class AudioCapture(
         record.startRecording()
 
         captureJob = scope.launch {
-            val chunk = ShortArray(ModelConfig.WHISPER_CHUNK_SIZE)
+            val chunk = ShortArray(ModelConfig.STT_CHUNK_SIZE)
             var inSpeech = false
             var silenceFrames = 0
             var segmentEmitted = false
             val silenceThresholdFrames = (ModelConfig.VAD_MIN_SILENCE_MS /
-                (1000.0 * ModelConfig.WHISPER_CHUNK_SIZE / sampleRate)).toInt()
+                (1000.0 * ModelConfig.STT_CHUNK_SIZE / sampleRate)).toInt()
             val segmentThresholdFrames = (300.0 /
-                (1000.0 * ModelConfig.WHISPER_CHUNK_SIZE / sampleRate)).toInt().coerceAtLeast(1)
+                (1000.0 * ModelConfig.STT_CHUNK_SIZE / sampleRate)).toInt().coerceAtLeast(1)
 
             while (isActive && isRunning.get()) {
                 val read = record.read(chunk, 0, chunk.size)
@@ -117,6 +120,8 @@ class AudioCapture(
                 when {
                     isSpeech && !inSpeech -> {
                         // Speech started — prepend pre-roll
+                        utteranceCounter += 1
+                        Log.d(tag, "utterance#$utteranceCounter speech-start read=$read preRoll=${preRollBuffer.size} chunkMs=${1000.0 * read / sampleRate}")
                         inSpeech = true
                         silenceFrames = 0
                         segmentEmitted = false
@@ -148,6 +153,7 @@ class AudioCapture(
                                 res
                             }
                             if (segment.isNotEmpty()) {
+                                Log.d(tag, "utterance#$utteranceCounter segment-ready samples=${segment.size} approxMs=${1000.0 * segment.size / sampleRate}")
                                 onUtteranceSegment(segment)
                             }
                         }
@@ -160,8 +166,13 @@ class AudioCapture(
                                 speechBuffer.clear()
                                 res
                             }
+                            Log.d(tag, "utterance#$utteranceCounter utterance-end samples=${utterance.size} approxMs=${1000.0 * utterance.size / sampleRate}")
                             onSpeechEnd()
-                            onUtterance(utterance)
+                            if (!segmentEmitted) {
+                                onUtterance(utterance)
+                            } else {
+                                Log.d(tag, "utterance#$utteranceCounter suppressing utterance-end enqueue because segment already sent")
+                            }
                         }
                     }
                 }
@@ -171,6 +182,7 @@ class AudioCapture(
 
     fun suspendProcessing(durationMs: Long) {
         val untilMs = System.currentTimeMillis() + durationMs.coerceAtLeast(0L)
+        Log.d(tag, "suspendProcessing durationMs=$durationMs untilMs=$untilMs")
         suspendedUntilMs.set(untilMs)
         synchronized(bufferLock) {
             speechBuffer.clear()
@@ -179,6 +191,7 @@ class AudioCapture(
     }
 
     fun stop() {
+        Log.d(tag, "stop")
         isRunning.set(false)
         captureJob?.cancel()
         audioRecord?.stop()

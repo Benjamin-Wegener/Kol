@@ -69,10 +69,11 @@ class GemmaLiteRtInference(private val context: Context) {
                 conversation = newConversation
                 activeBackendLabel = label
                 Log.d(tag, "Gemma LiteRT-LM initialized with backend=$label: $modelPath")
+                Log.d(tag, "GEMMA SYSTEM PROMPT: ${ModelConfig.systemPromptForLog(preferredLanguage)}")
                 return@withContext
             } catch (throwable: Throwable) {
                 lastError = throwable
-                Log.w(tag, "Gemma LiteRT-LM init failed with backend=$label", throwable)
+                Log.w(tag, "Gemma LiteRT-LM init failed with backend=$label")
                 try {
                     engine?.close()
                 } catch (_: Exception) { }
@@ -106,12 +107,11 @@ class GemmaLiteRtInference(private val context: Context) {
         val rawBuffer = StringBuilder()
         var emittedVisibleLength = 0
         var completed = false
-
+        Log.d(tag, "GEMMA AUDIO INPUT BYTES=${audioWavBytes.size}")
+        Log.d(tag, "GEMMA AUDIO INPUT PROMPT: [audio bytes only; system prompt logged at init]")
         suspendCoroutine<Unit> { continuation ->
             currentConversation.sendMessageAsync(
-                Contents.of(
-                    Content.AudioBytes(audioWavBytes)
-                ),
+                Contents.of(Content.AudioBytes(audioWavBytes)),
                 object : MessageCallback {
                     override fun onMessage(message: Message) {
                         if (cancelRequested.get() || completed) return
@@ -121,7 +121,89 @@ class GemmaLiteRtInference(private val context: Context) {
                         }
                         val chunk = message.toString()
                         rawBuffer.append(chunk)
+                        Log.d(tag, "RAW GEMMA CHUNK: ${chunk.take(120)}")
+                        Log.d(tag, "RAW GEMMA BUFFER: ${rawBuffer.toString().take(300)}")
                         val parsed = parseVisibleResponse(rawBuffer.toString())
+                        if (parsed.language != null && parsed.language != responseLanguage) {
+                            responseLanguage = parsed.language
+                            onLanguage(responseLanguage)
+                        }
+                        if (parsed.userText != null) {
+                            Log.d(tag, "RAW GEMMA USER TEXT: ${parsed.userText}")
+                            onUserText(parsed.userText)
+                        }
+                        if (parsed.visibleText.length > emittedVisibleLength) {
+                            val delta = parsed.visibleText.substring(emittedVisibleLength)
+                            emittedVisibleLength = parsed.visibleText.length
+                            if (delta.isNotBlank()) {
+                                onToken(delta)
+                            }
+                        }
+                    }
+
+                    override fun onDone() {
+                        if (completed) return
+                        completed = true
+                        val parsed = parseVisibleResponse(rawBuffer.toString())
+                        Log.d(tag, "RAW GEMMA FINAL: ${rawBuffer.toString().take(1000)}")
+                        if (parsed.language != null && parsed.language != responseLanguage) {
+                            responseLanguage = parsed.language
+                            onLanguage(responseLanguage)
+                        }
+                        if (parsed.userText != null) {
+                            Log.d(tag, "RAW GEMMA FINAL USER TEXT: ${parsed.userText}")
+                            onUserText(parsed.userText)
+                        }
+                        if (parsed.visibleText.length > emittedVisibleLength) {
+                            val delta = parsed.visibleText.substring(emittedVisibleLength)
+                            emittedVisibleLength = parsed.visibleText.length
+                            if (delta.isNotBlank()) {
+                                onToken(delta)
+                            }
+                        }
+                        onDone()
+                        Log.d(tag, "RAW LLM FINAL: ${rawBuffer.toString().take(500)}")
+                        continuation.resume(Unit)
+                    }
+
+                    override fun onError(throwable: Throwable) {
+                        if (completed) return
+                        completed = true
+                        Log.e(tag, "Gemma inference failed", throwable)
+                        onDone()
+                        continuation.resume(Unit)
+                    }
+                },
+                emptyMap()
+            )
+        }
+    }
+
+    suspend fun generateFromText(
+        prompt: String,
+        onToken: (String) -> Unit,
+        onLanguage: (String) -> Unit = {}
+    ) = withContext(Dispatchers.IO) {
+        cancelRequested.set(false)
+        responseLanguage = "en"
+
+        val currentConversation = conversation ?: return@withContext
+        val rawBuffer = StringBuilder()
+        var emittedVisibleLength = 0
+        var completed = false
+        Log.d(tag, "GEMMA TEXT PROMPT: $prompt")
+
+        suspendCoroutine<Unit> { continuation ->
+            currentConversation.sendMessageAsync(
+                Contents.of(Content.Text(prompt)),
+                object : MessageCallback {
+                    override fun onMessage(message: Message) {
+                        if (cancelRequested.get() || completed) return
+                        val chunk = message.toString()
+                        rawBuffer.append(chunk)
+                        Log.d(tag, "RAW GEMMA CHUNK: ${chunk.take(120)}")
+                        val parsed = parseVisibleResponse(rawBuffer.toString())
+                        Log.d(tag, "RAW GEMMA BUFFER: ${rawBuffer.toString().take(300)}")
                         if (parsed.language != null && parsed.language != responseLanguage) {
                             responseLanguage = parsed.language
                             onLanguage(responseLanguage)
@@ -139,6 +221,7 @@ class GemmaLiteRtInference(private val context: Context) {
                         if (completed) return
                         completed = true
                         val parsed = parseVisibleResponse(rawBuffer.toString())
+                        Log.d(tag, "RAW GEMMA FINAL: ${rawBuffer.toString().take(1000)}")
                         if (parsed.language != null && parsed.language != responseLanguage) {
                             responseLanguage = parsed.language
                             onLanguage(responseLanguage)
@@ -150,7 +233,6 @@ class GemmaLiteRtInference(private val context: Context) {
                                 onToken(delta)
                             }
                         }
-                        onDone()
                         continuation.resume(Unit)
                     }
 
@@ -158,7 +240,6 @@ class GemmaLiteRtInference(private val context: Context) {
                         if (completed) return
                         completed = true
                         Log.e(tag, "Gemma inference failed", throwable)
-                        onDone()
                         continuation.resume(Unit)
                     }
                 },
@@ -237,12 +318,25 @@ class GemmaLiteRtInference(private val context: Context) {
             withoutThinking.startsWith("[") &&
             !withoutThinking.contains("]")
         val userText = userMatch?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
-        val visible = when {
+        val visibleCandidate = when {
             markerMatch != null -> afterUser.removeRange(markerMatch.range).trimStart()
             waitingForPrefixCompletion -> ""
             afterUser.startsWith("[lang") -> ""
             else -> afterUser
         }
+        val visible = stripLeadingBracketNoise(visibleCandidate)
         return ParsedResponse(userText, language, visible, waitingForPrefixCompletion)
+    }
+
+    private fun stripLeadingBracketNoise(text: String): String {
+        var current = text.trimStart()
+        while (current.startsWith("[")) {
+            val closingBracket = current.indexOf(']')
+            if (closingBracket < 0) {
+                return ""
+            }
+            current = current.substring(closingBracket + 1).trimStart()
+        }
+        return current
     }
 }

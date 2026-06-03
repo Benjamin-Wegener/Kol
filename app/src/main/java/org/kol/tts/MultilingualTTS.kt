@@ -17,7 +17,7 @@ import kotlin.math.abs
  * Text-to-speech using the sherpa-onnx multilingual TTS model.
  * Synthesizes text to FloatArray PCM.
  *
- * Voice is selected based on the detected language from Whisper.
+ * Voice is selected based on the detected language from STT.
  * This is the shared multilingual TTS path.
  */
 class MultilingualTTS(context: Context) {
@@ -75,7 +75,7 @@ class MultilingualTTS(context: Context) {
     /**
      * Synthesize text to float PCM samples.
      * @param text      sentence to speak
-     * @param language  language code from Whisper (e.g. "de", "zh")
+     * @param language  language code from STT (e.g. "de", "zh")
      * @return float32 PCM at ModelConfig.TTS_SAMPLE_RATE
      */
     fun synthesize(text: String, language: String): FloatArray {

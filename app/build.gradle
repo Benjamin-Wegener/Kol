@@ -96,4 +96,6 @@ dependencies {
     // Sherpa-ONNX: STT (Whisper tiny) + TTS (Kokoro/Piper) + VAD (Silero)
     implementation files("libs/sherpa-onnx.aar")
 
+    testImplementation 'junit:junit:4.13.2'
+
 }
