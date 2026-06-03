@@ -32,6 +32,7 @@ class ModelDownloader(private val context: Context) {
         val totalBytesDownloaded: Long,   // across all files this session
         val totalBytesExpected: Long,
         val currentFile: String = "",
+        val currentFileIsResuming: Boolean = false,
         val speedBytesPerSec: Long = 0L,
         val etaSeconds: Long = -1L,
         val done: Boolean = false,
@@ -166,7 +167,8 @@ class ModelDownloader(private val context: Context) {
             fileStates[idx] = fileStates[idx].copy(state = FileState.DOWNLOADING)
             _progress.value = _progress.value.copy(
                 files = fileStates.toList(),
-                currentFile = fileName
+                currentFile = fileName,
+                currentFileIsResuming = false
             )
 
             val success = downloadFile(
@@ -189,6 +191,7 @@ class ModelDownloader(private val context: Context) {
                         totalBytesDownloaded = sessionDownloaded + dlBytes,
                         totalBytesExpected = totalExpected,
                         currentFile = fileName,
+                        currentFileIsResuming = dlBytes > 0L,
                         speedBytesPerSec = speed,
                         etaSeconds = eta
                     )
@@ -246,17 +249,35 @@ class ModelDownloader(private val context: Context) {
         onProgress: (Long, Long) -> Unit
     ): Boolean {
         return try {
+            val tmp = File(dest.parent, "${dest.name}.tmp")
+            val existingBytes = if (tmp.exists()) tmp.length() else 0L
+
             val conn = URL(url).openConnection() as HttpURLConnection
             conn.connectTimeout = 30_000
             conn.readTimeout = 60_000
+            if (existingBytes > 0L) {
+                conn.setRequestProperty("Range", "bytes=$existingBytes-")
+                Log.d(TAG, "Resuming $name from byte $existingBytes")
+            }
             conn.connect()
 
-            val total = if (conn.contentLengthLong > 0) conn.contentLengthLong else knownTotal
-            var downloaded = 0L
-            val tmp = File(dest.parent, "${dest.name}.tmp")
+            val responseCode = conn.responseCode
+            val total = when {
+                responseCode == HttpURLConnection.HTTP_PARTIAL -> {
+                    val rangeHeader = conn.getHeaderField("Content-Range")
+                    val slash = rangeHeader?.lastIndexOf('/') ?: -1
+                    if (slash >= 0) rangeHeader.substring(slash + 1).toLongOrNull() ?: knownTotal else knownTotal
+                }
+                conn.contentLengthLong > 0 -> conn.contentLengthLong + existingBytes
+                else -> knownTotal
+            }
+            var downloaded = existingBytes
 
             conn.inputStream.use { input ->
                 tmp.outputStream().use { output ->
+                    if (existingBytes > 0L) {
+                        output.channel.position(existingBytes)
+                    }
                     val buf = ByteArray(32_768)
                     var n: Int
                     while (input.read(buf).also { n = it } != -1) {
@@ -267,7 +288,10 @@ class ModelDownloader(private val context: Context) {
                 }
             }
 
-            tmp.renameTo(dest)
+            if (dest.exists()) dest.delete()
+            if (!tmp.renameTo(dest)) {
+                throw IOException("Failed to move ${tmp.absolutePath} to ${dest.absolutePath}")
+            }
             Log.d(TAG, "Downloaded $name (${"%,.1f".format(downloaded / 1_048_576f)} MB)")
             true
         } catch (e: Exception) {

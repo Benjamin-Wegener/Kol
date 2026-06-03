@@ -2,86 +2,137 @@
   <img src="logo_v1.png" alt="Kol Logo" width="220" />
 </div>
 
-**Kol** is a local-first Android call agent.
+**Kol** is a local-first Android voice assistant.
 
-It turns a dedicated Android phone into an always-on receptionist that can answer calls,
-understand intent, respond with natural voice, and complete simple call workflows fully
-on-device.
-
-No cloud inference. No remote speech backend. No account required.
+It runs a full speech pipeline entirely on-device: voice activity detection, multimodal
+audio-to-text-to-speech inference, and natural voice output — with no cloud roundtrip,
+no account, and no data leaving the phone.
 
 ---
 
-## Features
+## Current Status
 
-- Fully on-device voice loop (STT -> LLM -> TTS)
-- Hands-free conversational responses for inbound calls
-- Local-first privacy model (audio and transcripts stay on device)
-- Single LLM target for alpha: Gemma 4 E2B
-- On-device speech recognition via whisper.cpp
-- Whisper multilingual model ladder: small (default), medium, large-v3
-- Language-selectable TTS target set: German, English, Spanish, Chinese
-- On-device speech synthesis via Sherpa-ONNX / Piper stack
-- Offline-capable operation after model setup
-- Android-native app architecture (no Electron/web wrapper)
+Active development — alpha. The core pipeline is wired end-to-end and builds to a
+runnable APK. Model downloads, voice loop, and UI are functional; call-workflow logic
+is not yet implemented.
 
-## Alpha Scope (Locked)
+### What works
+- Full pipeline: Mic → VAD → Gemma 4 E2B (LiteRT-LM) → SentenceBatcher → SupertonicTTS → Speaker
+- Barge-in: VAD fires during TTS playback → cancels LLM generation + flushes audio queue
+- Language detection: Gemma prefixes replies with `[lang=xx]`; TTS selects voice accordingly
+- Model download screen with per-file progress bars, speed (KB/s or MB/s), ETA, retry on error
+- Auto-skips files already cached on disk
+- Animated orb UI reacts to engine state (Idle / Listening / Thinking / Speaking / Error)
+- 16 KB page-size compliant APK (`.so` files stored uncompressed, zipalign at 16384)
+- Debug APK sideloadable via `adb push` or Files app
 
-Kol alpha intentionally keeps only the minimum runtime surface:
+### What is not yet implemented
+- Call reception / telephony integration
+- Conversation history / multi-turn memory
+- Settings screen (voice, language, speed)
+- Wake-word activation
+- Background service / always-on mode
 
-- Active tasks: `LLM Chat` and `Whisper`
-- LLM allowlist: `Gemma-4-E2B-it` only
-- Whisper allowlist: multilingual `small`, `medium`, `large-v3`
-- Everything else is being removed or left disabled for now
+### Near-term roadmap
+- Turn the main screen into a scrollable WhatsApp-style chat with left/right bubbles.
+- Show the user transcript and assistant replies as separate chat messages.
+- Keep the conversation pinned to the latest message while still allowing manual scrollback.
+- Stop microphone capture while the assistant is speaking, and resume only after playback ends.
+- Investigate and fix TTS sentence ordering so later snippets do not play before earlier ones.
+- Review shared audio state for races in `VoiceAssistantEngine`, `AudioPlayer`, and playback handoff logic.
+- Keep Gemma in no-thinking mode while still allowing longer, fuller answers when useful.
+- Make the launcher icon and in-app logo match `logo_v1.png` exactly.
+- Rebuild after each pass, then verify the chat surface and audio handoff on device.
 
 ---
 
-## What Kol Is For
+## Pipeline Architecture
 
-- Small business call reception
-- After-hours answering
-- Appointment and callback intake
-- Basic caller triage and escalation
-
-Kol is designed for a dedicated device that stays plugged in and runs continuously.
+```
+Microphone
+    └─▶ AudioCapture (AEC + NoiseSuppressor)
+            └─▶ VadDetector (Silero VAD v4 / sherpa-onnx)
+                    └─▶  [utterance complete]
+                            └─▶ GemmaLiteRtInference
+                                   │  Gemma 4 E2B (LiteRT-LM)
+                                   │  GPU backend → CPU fallback
+                                   │  streams tokens
+                                   └─▶ SentenceBatcher
+                                           └─▶ MultilingualTTS
+                                                  │  SupertonicTTS int8
+                                                  │  31 languages
+                                                  └─▶ AudioPlayer
+                                                          └─▶ Speaker
+```
 
 ---
 
-## Privacy Model
+## Models
 
-1. Speech processing runs locally on the device
-2. Language inference runs locally on the device
-3. Voice generation runs locally on the device
-4. No mandatory cloud roundtrip for call handling
+| Model | File | Size | Source |
+|---|---|---|---|
+| Silero VAD v4 | `silero_vad.onnx` | ~2 MB | k2-fsa/sherpa-onnx |
+| Gemma 4 E2B | `gemma-4-E2B-it.litertlm` | ~2.5 GB | litert-community/gemma-4-E2B-it-litert-lm |
+| SupertonicTTS int8 | `sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2` | ~300 MB | k2-fsa/sherpa-onnx |
 
-Network access may still be used for optional model downloads and update checks.
+All models are downloaded on first launch via `SetupActivity` into `filesDir/models/`.
+No model files are bundled in the APK.
 
 ---
 
 ## Runtime Stack
 
-- Upstream foundation: Google AI Edge Gallery (via Box fork lineage)
-- LLM runtime: llama.cpp (GGUF)
-- Speech-to-text: whisper.cpp
-- Text-to-speech: Sherpa-ONNX / Piper
-- Platform: Android (Kotlin + native modules)
+| Layer | Technology |
+|---|---|
+| LLM | Gemma 4 E2B via Google LiteRT-LM (`com.google.ai.edge.litertlm`) |
+| VAD | Silero VAD v4 via sherpa-onnx JNI |
+| TTS | SupertonicTTS int8 (31 languages) via sherpa-onnx JNI |
+| Audio I/O | Android `AudioRecord` + `AudioTrack` |
+| AEC / NS | `AcousticEchoCanceler` + `NoiseSuppressor` (Android audiofx) |
+| Concurrency | Kotlin coroutines + `StateFlow` |
+| UI | View-based (ViewBinding), custom `OrbView` canvas animation |
+
+---
+
+## Features
+
+- Fully on-device voice loop — audio and transcripts never leave the device
+- Multimodal: Gemma 4 E2B receives raw audio bytes directly (no separate STT model)
+- Multilingual: 31-language TTS, language auto-detected from Gemma's `[lang=xx]` prefix
+- Barge-in support: user can interrupt the assistant mid-reply
+- Streaming TTS: sentences are synthesized and queued as Gemma tokens arrive
+- GPU-accelerated inference with automatic CPU fallback
+- Offline-capable after initial model download
+
+---
+
+## Privacy Model
+
+1. Voice activity detection runs locally
+2. Speech understanding runs locally (Gemma 4 E2B on-device)
+3. Voice synthesis runs locally (SupertonicTTS on-device)
+4. No mandatory cloud roundtrip at any stage
+
+Network is used only for the one-time model download on first launch.
 
 ---
 
 ## Requirements
 
 - Android Studio (latest stable)
-- Android SDK installed
-- NDK side-by-side (project auto-installs required version on first build)
-- Physical Android device recommended for realistic testing
+- Android SDK 34+
+- `minSdk` 26 (Android 8.0)
+- `abiFilter`: `arm64-v8a` only
+- Physical device strongly recommended (emulators lack NNAPI / GPU delegates)
+- ~3 GB free storage for models
 
 ---
 
-## Build (Debug)
+## Build
 
 ```bash
-git clone --recurse-submodules <your-kol-repo-url>
-cd Kol/Android/src
+git clone <repo-url>
+cd Kol
 ```
 
 Create `local.properties` if needed:
@@ -90,20 +141,49 @@ Create `local.properties` if needed:
 sdk.dir=/Users/<your-user>/Library/Android/sdk
 ```
 
-Build:
+Build debug APK:
 
 ```bash
 ./gradlew :app:assembleDebug
 ```
 
-Install from Android Studio or via `adb` using the generated debug APK.
+Push to device:
+
+```bash
+~/Library/Android/sdk/platform-tools/adb push \
+  app/build/outputs/apk/debug/app-debug.apk \
+  /sdcard/Download/Kol.apk
+```
+
+Then open the Files app on the phone and tap `Kol.apk` to install
+(requires *Install unknown apps* enabled for Files).
 
 ---
 
-## Current Status
+## Project Structure
 
-Early alpha. Core direction and local runtime foundation are in place; product behavior,
-call workflow logic, and UX are still being iterated.
+```
+app/src/main/java/org/kol/
+├── ModelConfig.kt            # Model filenames, URLs, runtime constants, system prompt
+├── ModelDownloader.kt        # Download manager with per-file progress, speed, ETA
+├── VoiceAssistantEngine.kt   # Pipeline orchestrator (VAD → Gemma → TTS), barge-in logic
+├── ai/
+│   └── RuntimeProviders.kt  # NNAPI / CPU provider selection helpers
+├── audio/
+│   ├── AudioCapture.kt       # Mic capture, AEC, NS, VAD integration, utterance detection
+│   ├── AudioPlayer.kt        # AudioTrack-based PCM player with queue
+│   └── VadDetector.kt        # Silero VAD v4 wrapper (sherpa-onnx)
+├── llm/
+│   ├── GemmaLiteRtInference.kt  # LiteRT-LM engine, GPU→CPU fallback, streaming tokens
+│   └── SentenceBatcher.kt       # Buffers tokens, flushes complete sentences to TTS
+├── tts/
+│   └── MultilingualTTS.kt    # SupertonicTTS wrapper, language → voice mapping
+└── ui/
+    ├── MainActivity.kt       # Main screen, permission handling, engine lifecycle
+    ├── MainViewModel.kt      # ViewModel bridging engine state to UI
+    ├── OrbView.kt            # Animated orb canvas view (idle/listening/thinking/speaking)
+    └── SetupActivity.kt      # First-run model download UI with detailed progress
+```
 
 ---
 

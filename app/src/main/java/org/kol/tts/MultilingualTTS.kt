@@ -91,7 +91,7 @@ class MultilingualTTS(context: Context) {
             config = GenerationConfig(
                 sid = speakerId,
                 speed = ModelConfig.TTS_SPEED,
-                numSteps = 8,
+                numSteps = 6,
                 extra = mapOf("lang" to normalizedLanguage)
             )
         )
@@ -129,6 +129,7 @@ class MultilingualTTS(context: Context) {
         val normalized = when (language.lowercase()) {
             "zh-cn", "zh-tw", "cmn" -> "zh"
             "pt-br", "pt-pt" -> "pt"
+            "default", "auto" -> "en"
             "jp" -> "ja"
             "kr" -> "ko"
             else -> language.lowercase()

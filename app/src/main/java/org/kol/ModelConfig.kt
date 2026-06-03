@@ -7,17 +7,11 @@ object ModelConfig {
 
     // ── Model filenames (downloaded into app's filesDir) ──────────────────────
 
-    // STT: Whisper tiny multilingual via sherpa-onnx
-    const val WHISPER_ENCODER   = "whisper-tiny-encoder.int8.onnx"
-    const val WHISPER_DECODER   = "whisper-tiny-decoder.int8.onnx"
-    const val WHISPER_TOKENS    = "whisper-tiny-tokens.txt"
-    const val WHISPER_LANG_FILE = "whisper-tiny-multilingual.onnx"   // optional language-id model
-
     // VAD: Silero VAD v4
     const val SILERO_VAD        = "silero_vad.onnx"
 
-    // LLM: Unsloth Qwen3.5 0.8B UD-IQ3_XXS (~380 MB GGUF)
-    const val QWEN_GGUF         = "Qwen3.5-0.8B-UD-IQ3_XXS.gguf"
+    // Multimodal voice model: Gemma 4 E2B for LiteRT-LM
+    const val GEMMA_LITERTLM    = "gemma-4-E2B-it.litertlm"
 
     // TTS: multilingual SupertonicTTS bundle (31 languages)
     const val SUPERTONIC_DIR = "sherpa-onnx-supertonic-3-tts-int8-2026-05-11"
@@ -33,31 +27,54 @@ object ModelConfig {
     // ── HuggingFace download URLs ─────────────────────────────────────────────
 
     val DOWNLOAD_URLS = linkedMapOf(
-        WHISPER_ENCODER  to "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny/resolve/main/tiny-encoder.int8.onnx",
-        WHISPER_DECODER  to "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny/resolve/main/tiny-decoder.int8.onnx",
-        WHISPER_TOKENS   to "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-tiny/resolve/main/tiny-tokens.txt",
         SILERO_VAD       to "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
-        QWEN_GGUF        to "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-UD-IQ3_XXS.gguf",
+        GEMMA_LITERTLM   to "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
         SUPERTONIC_ARCHIVE to "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2"
     )
 
     // ── Runtime config ─────────────────────────────────────────────────────────
 
-    // LLM
-    const val LLM_CONTEXT_SIZE    = 2048
-    const val LLM_THREADS         = 4
-    const val LLM_TEMPERATURE     = 0.7f
-    const val LLM_TOP_K           = 20
-    const val LLM_TOP_P           = 0.95f
-    const val LLM_PRESENCE_PENALTY = 1.5f
+    // Gemma / LiteRT-LM
+    const val GEMMA_MAX_TOKENS    = 512
+    const val GEMMA_TOP_K         = 20
+    const val GEMMA_TOP_P         = 0.95f
+    const val GEMMA_TEMPERATURE   = 0.7f
 
-    // System prompt: respond conversationally in the user's language, no markdown
-    const val SYSTEM_PROMPT = """You are a helpful voice assistant. 
-Always reply in the same language the user speaks.
-Keep answers concise and conversational.
-Do not think aloud, do not explain your reasoning, and do not output hidden reasoning.
-No bullet points, no markdown, no code.
-Answer in at most one short sentence unless the user explicitly asks for more detail."""
+    data class LanguageOption(
+        val id: String,
+        val label: String,
+        val languageCode: String?,
+        val flag: String
+    )
+
+    val LANGUAGE_OPTIONS = listOf(
+        LanguageOption("default", "Default", null, "🌐"),
+        LanguageOption("en", "English", "en", "🇬🇧"),
+        LanguageOption("de", "German", "de", "🇩🇪"),
+        LanguageOption("fr", "French", "fr", "🇫🇷"),
+        LanguageOption("es", "Spanish", "es", "🇪🇸"),
+        LanguageOption("zh", "Chinese", "zh", "🇨🇳")
+    )
+
+    fun systemPrompt(preferredLanguage: String? = null): String {
+        val languageInstruction = when (preferredLanguage) {
+            null, "default", "auto" -> "Reply in the same language the user speaks."
+            "en" -> "Reply only in English."
+            "de" -> "Reply only in German."
+            "fr" -> "Reply only in French."
+            "es" -> "Reply only in Spanish."
+            "zh" -> "Reply only in Chinese."
+            else -> "Reply in the same language the user speaks."
+        }
+        return """You are a helpful voice assistant.
+The user's message may be audio.
+${languageInstruction}
+First write a faithful short transcript of what the user said as [user=...].
+Then write the spoken reply as [lang=xx]... where xx is the ISO language code.
+Do not think aloud, explain reasoning, reveal hidden thoughts, or use a thought channel.
+Be concise by default, but give a fuller answer when the user asks for one or the topic needs it.
+No markdown, no bullet points, no code unless asked."""
+    }
 
     // STT
     const val WHISPER_SAMPLE_RATE = 16000
@@ -85,8 +102,7 @@ Answer in at most one short sentence unless the user explicitly asks for more de
 
     fun allModelsPresent(context: Context): Boolean {
         val required = listOf(
-            WHISPER_ENCODER, WHISPER_DECODER, WHISPER_TOKENS,
-            SILERO_VAD, QWEN_GGUF,
+            SILERO_VAD, GEMMA_LITERTLM,
             SUPERTONIC_DURATION_PREDICTOR,
             SUPERTONIC_TEXT_ENCODER,
             SUPERTONIC_VECTOR_ESTIMATOR,

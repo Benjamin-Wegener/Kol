@@ -16,18 +16,18 @@
         android:paddingBottom="28dp">
 
         <ImageView
-            android:layout_width="250dp"
-            android:layout_height="125dp"
+            android:layout_width="112dp"
+            android:layout_height="112dp"
             android:layout_marginTop="8dp"
-            android:contentDescription="@string/app_name"
-            android:scaleType="fitCenter"
-            android:src="@drawable/kol_logo_mark" />
+            android:contentDescription="Kol logo"
+            android:src="@drawable/kol_logo_mark"
+            android:scaleType="fitCenter" />
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:text="Local-first call agent"
+            android:text="🤖"
             android:textColor="@color/kol_ink_700"
             android:textSize="14sp"
             android:textStyle="bold" />
@@ -37,7 +37,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
             android:layout_marginBottom="22dp"
-            android:text="Downloading the on-device stack for Kol."
+            android:text="⬇️"
             android:textColor="@color/kol_ink_500"
             android:textSize="13sp" />
 
@@ -69,7 +69,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="Downloading models"
+                        android:text="📦"
                         android:textColor="@color/kol_ink_900"
                         android:textSize="15sp"
                         android:textStyle="bold" />
@@ -181,7 +181,7 @@
             android:backgroundTint="@null"
             android:paddingHorizontal="26dp"
             android:paddingVertical="12dp"
-            android:text="Retry"
+                    android:text="🔁"
             android:textAllCaps="false"
             android:textColor="@color/kol_surface_alt"
             android:visibility="gone" />

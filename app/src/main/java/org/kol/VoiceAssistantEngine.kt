@@ -5,11 +5,10 @@ import android.util.Log
 import com.voiceassistant.audio.AudioCapture
 import com.voiceassistant.audio.AudioPlayer
 import com.voiceassistant.audio.VadDetector
-import com.voiceassistant.llm.LlamaInference
+import com.voiceassistant.llm.GemmaLiteRtInference
 import com.voiceassistant.llm.SentenceBatcher
-import com.voiceassistant.stt.WhisperSTT
 import com.voiceassistant.tts.MultilingualTTS
-import com.voiceassistant.llm.LlamaInference.Companion.isNativeAvailable
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -22,7 +21,7 @@ import kotlinx.coroutines.sync.withLock
 /**
  * Orchestrates the full pipeline:
  *
- *   Mic → VAD → Whisper → Qwen3 (streaming) → SentenceBatcher → multilingual TTS → Speaker
+ *   Mic → VAD → Gemma 4 E2B (LiteRT-LM) → SentenceBatcher → multilingual TTS → Speaker
  *
  * Barge-in: VAD fires during TTS playback → cancel LLM + flush audio → new utterance
  */
@@ -36,7 +35,7 @@ class VoiceAssistantEngine(private val context: Context) {
     sealed class State {
         object Idle : State()
         object Listening : State()
-        object Transcribing : State()
+        object Understanding : State()
         data class Thinking(val partial: String) : State()
         data class Speaking(val text: String) : State()
         data class Error(val message: String) : State()
@@ -54,33 +53,43 @@ class VoiceAssistantEngine(private val context: Context) {
     // ── Components (lazy init after models are ready) ──────────────────────────
 
     private var vad: VadDetector? = null
-    private var whisper: WhisperSTT? = null
-    private var llama: LlamaInference? = null
+    private var gemma: GemmaLiteRtInference? = null
     private var kokoro: MultilingualTTS? = null
     private var player: AudioPlayer? = null
     private var capture: AudioCapture? = null
     private var ttsUnavailable = false
+    @Volatile
+    private var preferredLanguageCode: String? = null
+    private val gemmaMutex = Mutex()
     private val ttsMutex = Mutex()
+    private val llmSentenceQueue = Channel<FloatArray>(Channel.UNLIMITED)
+    private val ttsSentenceQueue = Channel<String>(Channel.UNLIMITED)
 
     private val sentenceBatcher = SentenceBatcher(
         onSentenceReady = { sentence ->
             Log.d(TAG, "Sentence ready for TTS: $sentence")
-            synthesizeAndPlay(sentence)
+            ttsSentenceQueue.trySend(sentence)
         }
     )
 
     private var detectedLanguage = "en"
-    private var currentUserText = ""
 
-    private fun ensureLlama(): LlamaInference? {
-        val current = llama
+    private suspend fun ensureGemma(): GemmaLiteRtInference? {
+        val current = gemma
         if (current != null) return current
-        if (!isNativeAvailable) return null
-        return try {
-            LlamaInference(context).also { llama = it }
-        } catch (e: Exception) {
-            Log.w(TAG, "LLM unavailable on demand; continuing without LLM", e)
-            null
+        return gemmaMutex.withLock {
+            val lockedCurrent = gemma
+            if (lockedCurrent != null) return@withLock lockedCurrent
+            try {
+                GemmaLiteRtInference(context).also {
+                    it.setPreferredLanguage(preferredLanguageCode)
+                    it.initialize()
+                    gemma = it
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Gemma LiteRT-LM unavailable on demand; continuing without LLM", e)
+                null
+            }
         }
     }
 
@@ -109,12 +118,12 @@ class VoiceAssistantEngine(private val context: Context) {
             try {
                 Log.d(TAG, "Initializing models...")
                 vad     = VadDetector(context)
-                whisper = WhisperSTT(context)
                 player  = AudioPlayer().also { it.start() }
 
                 capture = AudioCapture(
                     vad = vad!!,
                     onUtterance    = ::onUtteranceReady,
+                    onUtteranceSegment = ::onUtteranceSegmentReady,
                     onSpeechStart  = ::onSpeechStart,
                     onSpeechEnd    = ::onSpeechEnd
                 )
@@ -122,6 +131,20 @@ class VoiceAssistantEngine(private val context: Context) {
                 capture!!.start()
                 _state.value = State.Listening
                 Log.d(TAG, "Engine ready")
+                scope.launch {
+                    Log.d(TAG, "Prewarming Gemma LiteRT-LM")
+                    ensureGemma()
+                }
+                scope.launch {
+                    Log.d(TAG, "Prewarming multilingual TTS")
+                    ensureTts()
+                }
+                scope.launch {
+                    drainLlmQueue()
+                }
+                scope.launch {
+                    drainTtsQueue()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Init failed", e)
                 _state.value = State.Error("Failed to load models: ${e.message}")
@@ -129,83 +152,98 @@ class VoiceAssistantEngine(private val context: Context) {
         }
     }
 
+    private fun onUtteranceSegmentReady(samples: FloatArray) {
+        if (samples.isNotEmpty()) {
+            llmSentenceQueue.trySend(samples)
+        }
+    }
+
     private fun onSpeechStart() {
         // User started speaking — if we're currently speaking, barge in
-        if (_state.value is State.Speaking || _state.value is State.Thinking) {
-            Log.d(TAG, "Barge-in detected")
-            bargeIn()
+        if (_state.value is State.Speaking) {
+            return
         }
         _state.value = State.Listening
     }
 
     private fun onSpeechEnd() {
-        _state.value = State.Transcribing
+        _state.value = State.Understanding
     }
 
     private fun onUtteranceReady(samples: FloatArray) {
-        scope.launch(Dispatchers.IO) {
-            try {
-                // 1. STT
-                val sttResult = whisper!!.transcribe(samples)
-                val text = sttResult.text
-                detectedLanguage = sttResult.language
+        llmSentenceQueue.trySend(samples)
+    }
 
-                if (text.isBlank()) {
-                    _state.value = State.Listening
-                    return@launch
-                }
-
-                currentUserText = text
-                _transcript.value = text
-                Log.d(TAG, "STT [$detectedLanguage]: $text")
-
-                // 2. LLM (streaming)
-                _state.value = State.Thinking("")
-                _response.value = ""
-                sentenceBatcher.reset()
-
-                val currentLlama = ensureLlama()
-                if (currentLlama == null) {
-                    _response.value = "LLM unavailable on this build."
-                    _state.value = State.Listening
-                    return@launch
-                }
-
-                currentLlama.generate(
-                    userText = text,
-                    language = detectedLanguage,
-                    onToken = { token ->
-                        Log.d(TAG, "LLM token: ${token.take(40)}")
-                        val current = _response.value + token
-                        _response.value = current
-                        _state.value = State.Thinking(current)
-                        sentenceBatcher.addToken(token)
-                    },
-                    onDone = {
-                        Log.d(TAG, "LLM done; flushing remaining response")
-                        sentenceBatcher.done()
-                        val fullResponse = sentenceBatcher.getFullResponse()
-                        Log.d(TAG, "LLM full response length=${fullResponse.length}")
-                        if (fullResponse.isNotBlank()) {
-                            currentLlama.appendToHistory(currentUserText, fullResponse)
-                        }
-                        if (_state.value !is State.Speaking) {
-                            _state.value = State.Listening
-                        }
-                    }
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "Pipeline error", e)
-                _state.value = State.Error(e.message ?: "Unknown error")
-            }
+    private suspend fun drainLlmQueue() {
+        for (samples in llmSentenceQueue) {
+            processUtterance(samples)
         }
     }
+
+    private suspend fun processUtterance(samples: FloatArray) {
+        try {
+            val wavBytes = toWavBytes(samples, ModelConfig.WHISPER_SAMPLE_RATE)
+            Log.d(TAG, "Audio utterance ready bytes=${wavBytes.size}")
+
+            _state.value = State.Thinking("")
+            _response.value = ""
+            sentenceBatcher.reset()
+
+            val currentGemma = ensureGemma()
+            if (currentGemma == null) {
+                _response.value = "LLM unavailable on this build."
+                _state.value = State.Listening
+                return
+            }
+
+            currentGemma.generateFromAudio(
+                audioWavBytes = wavBytes,
+                onToken = { token ->
+                    Log.d(TAG, "LLM token: ${token.take(40)}")
+                    val current = _response.value + token
+                    _response.value = current
+                    _state.value = State.Thinking(current)
+                    sentenceBatcher.addToken(token)
+                },
+                onUserText = { userText ->
+                    if (userText.isNotBlank()) {
+                        _transcript.value = userText
+                        Log.d(TAG, "Gemma user transcript=$userText")
+                    }
+                },
+                onLanguage = { language ->
+                    detectedLanguage = preferredLanguageCode ?: language
+                    Log.d(TAG, "Gemma response language=$language")
+                },
+                onDone = {
+                    Log.d(TAG, "LLM done; flushing remaining response")
+                    sentenceBatcher.done()
+                    val fullResponse = sentenceBatcher.getFullResponse()
+                    Log.d(TAG, "LLM full response length=${fullResponse.length}")
+                    if (_state.value !is State.Speaking) {
+                        _state.value = State.Listening
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Pipeline error", e)
+            _state.value = State.Error(e.message ?: "Unknown error")
+        }
+    }
+
+    fun setPreferredLanguage(languageCode: String?) {
+        preferredLanguageCode = languageCode?.takeIf { it.isNotBlank() && it != "default" && it != "auto" }
+        gemma?.setPreferredLanguage(preferredLanguageCode)
+        detectedLanguage = preferredLanguageCode ?: detectedLanguage
+    }
+
+    fun preferredLanguage(): String? = preferredLanguageCode
 
     /**
      * Synthesize a sentence on IO thread, enqueue audio chunks to player.
      * Runs in parallel with LLM generating the next sentence.
      */
-    private fun synthesizeAndPlay(sentence: String) {
+    private suspend fun synthesizeAndPlay(sentence: String) {
         val spokenSentence = stripThinkingMarkup(sentence)
         if (spokenSentence.isBlank()) {
             Log.d(TAG, "Skipping empty/non-spoken sentence")
@@ -215,44 +253,41 @@ class VoiceAssistantEngine(private val context: Context) {
             Log.d(TAG, "Filtered sentence for TTS: $spokenSentence")
         }
         Log.d(TAG, "Synthesizing sentence: $spokenSentence")
-        scope.launch(Dispatchers.IO) {
-            try {
-                val ttsEngine = ensureTts()
-                if (ttsEngine == null) {
-                    Log.w(TAG, "Skipping TTS because multilingual TTS is unavailable")
-                    _state.value = State.Listening
-                    return@launch
+        try {
+            val ttsEngine = ensureTts()
+            if (ttsEngine == null) {
+                Log.w(TAG, "Skipping TTS because multilingual TTS is unavailable")
+                _state.value = State.Listening
+                return
+            }
+            val spokenLanguage = preferredLanguageCode ?: detectedLanguage
+            val samples = ttsEngine.synthesize(spokenSentence, spokenLanguage)
+            if (samples.isNotEmpty()) {
+                val playbackDurationMs = ((samples.size * 1000L) / ttsEngine.sampleRate)
+                    .coerceAtLeast(250L)
+                val micResumeDelayMs = playbackDurationMs + 500L
+                Log.d(TAG, "TTS produced ${samples.size} samples for language=$spokenLanguage")
+                capture?.suspendProcessing(micResumeDelayMs)
+                Log.d(TAG, "Suspending mic/VAD for ${micResumeDelayMs}ms during playback")
+                _state.value = State.Speaking(spokenSentence)
+                var offset = 0
+                while (offset < samples.size) {
+                    val end = (offset + 2048).coerceAtMost(samples.size)
+                    player?.enqueue(samples.copyOfRange(offset, end))
+                    offset = end
                 }
-                val samples = ttsEngine.synthesize(spokenSentence, detectedLanguage)
-                if (samples.isNotEmpty()) {
-                    val playbackDurationMs = ((samples.size * 1000L) / ttsEngine.sampleRate)
-                        .coerceAtLeast(250L)
-                    val micResumeDelayMs = playbackDurationMs + 500L
-                    Log.d(TAG, "TTS produced ${samples.size} samples for language=$detectedLanguage")
-                    capture?.suspendProcessing(micResumeDelayMs)
-                    Log.d(TAG, "Suspending mic/VAD for ${micResumeDelayMs}ms during playback")
-                    _state.value = State.Speaking(spokenSentence)
-                    // Stream in 2048-sample chunks so AudioTrack stays fed
-                    samples.toList().chunked(2048).forEach { chunk ->
-                        if (llama?.cancelRequested?.get() != true) {
-                            player!!.enqueue(chunk.toFloatArray())
-                        }
-                    }
-                    Log.d(TAG, "Queued ${samples.size} samples to AudioPlayer")
-                    scope.launch {
-                        delay(micResumeDelayMs)
-                        if (_state.value is State.Speaking) {
-                            _state.value = State.Listening
-                        }
-                    }
-                } else {
-                    Log.w(TAG, "TTS produced no samples")
+                Log.d(TAG, "Queued ${samples.size} samples to AudioPlayer")
+                delay(micResumeDelayMs)
+                if (_state.value is State.Speaking) {
                     _state.value = State.Listening
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "TTS error", e)
+            } else {
+                Log.w(TAG, "TTS produced no samples")
                 _state.value = State.Listening
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "TTS error", e)
+            _state.value = State.Listening
         }
     }
 
@@ -260,27 +295,34 @@ class VoiceAssistantEngine(private val context: Context) {
      * Barge-in: user interrupted. Cancel LLM, flush audio immediately.
      */
     private fun bargeIn() {
-        llama?.cancel()
+        gemma?.cancel()
         player?.flush()
         sentenceBatcher.reset()
         _response.value = ""
     }
 
+    private suspend fun drainTtsQueue() {
+        for (sentence in ttsSentenceQueue) {
+            synthesizeAndPlay(sentence)
+        }
+    }
+
     fun clearHistory() {
-        ensureLlama()?.clearHistory()
+        scope.launch {
+            ensureGemma()?.clearHistory()
+        }
         _transcript.value = ""
         _response.value = ""
     }
 
-    fun whisperProvider(): String = whisper?.provider ?: "cpu"
+    fun gemmaProvider(): String = gemma?.backend() ?: "cpu"
     fun vadProvider(): String = vad?.provider ?: "cpu"
     fun ttsProvider(): String = kokoro?.provider ?: "cpu"
 
     fun release() {
         capture?.stop()
         player?.stop()
-        whisper?.release()
-        llama?.release()
+        gemma?.release()
         kokoro?.release()
         vad?.release()
     }
@@ -298,5 +340,62 @@ class VoiceAssistantEngine(private val context: Context) {
         return result
             .replace(Regex("\\s+"), " ")
             .trim()
+    }
+
+    private fun toWavBytes(samples: FloatArray, sampleRate: Int): ByteArray {
+        val pcm = ByteArray(samples.size * 2)
+        var pcmIndex = 0
+        for (sample in samples) {
+            val shortSample = (sample.coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort()
+            pcm[pcmIndex++] = (shortSample.toInt() and 0xff).toByte()
+            pcm[pcmIndex++] = ((shortSample.toInt() shr 8) and 0xff).toByte()
+        }
+
+        val header = ByteArray(44)
+        val pcmDataSize = pcm.size
+        val wavFileSize = pcmDataSize + 36
+        val channels = 1
+        val bitsPerSample = 16
+        val byteRate = sampleRate * channels * bitsPerSample / 8
+
+        header[0] = 'R'.code.toByte()
+        header[1] = 'I'.code.toByte()
+        header[2] = 'F'.code.toByte()
+        header[3] = 'F'.code.toByte()
+        header[4] = (wavFileSize and 0xff).toByte()
+        header[5] = (wavFileSize shr 8 and 0xff).toByte()
+        header[6] = (wavFileSize shr 16 and 0xff).toByte()
+        header[7] = (wavFileSize shr 24 and 0xff).toByte()
+        header[8] = 'W'.code.toByte()
+        header[9] = 'A'.code.toByte()
+        header[10] = 'V'.code.toByte()
+        header[11] = 'E'.code.toByte()
+        header[12] = 'f'.code.toByte()
+        header[13] = 'm'.code.toByte()
+        header[14] = 't'.code.toByte()
+        header[15] = ' '.code.toByte()
+        header[16] = 16
+        header[20] = 1
+        header[22] = channels.toByte()
+        header[24] = (sampleRate and 0xff).toByte()
+        header[25] = (sampleRate shr 8 and 0xff).toByte()
+        header[26] = (sampleRate shr 16 and 0xff).toByte()
+        header[27] = (sampleRate shr 24).toByte()
+        header[28] = (byteRate and 0xff).toByte()
+        header[29] = (byteRate shr 8 and 0xff).toByte()
+        header[30] = (byteRate shr 16 and 0xff).toByte()
+        header[31] = (byteRate shr 24).toByte()
+        header[32] = (channels * bitsPerSample / 8).toByte()
+        header[34] = bitsPerSample.toByte()
+        header[36] = 'd'.code.toByte()
+        header[37] = 'a'.code.toByte()
+        header[38] = 't'.code.toByte()
+        header[39] = 'a'.code.toByte()
+        header[40] = (pcmDataSize and 0xff).toByte()
+        header[41] = (pcmDataSize shr 8 and 0xff).toByte()
+        header[42] = (pcmDataSize shr 16 and 0xff).toByte()
+        header[43] = (pcmDataSize shr 24).toByte()
+
+        return header + pcm
     }
 }

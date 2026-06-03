@@ -135,10 +135,14 @@ class SetupActivity : AppCompatActivity() {
                         binding.btnRetry.visibility = View.VISIBLE
                     }
                     else -> {
-                        binding.tvStatus.text = if (overall.currentFile.isNotEmpty())
-                            "Downloading ${overall.currentFile}\u2026"
-                        else
-                            "Preparing\u2026"
+                        binding.tvStatus.text = when {
+                            overall.currentFile.isNotEmpty() && overall.currentFileIsResuming ->
+                                "Resuming ${overall.currentFile}\u2026"
+                            overall.currentFile.isNotEmpty() ->
+                                "Downloading ${overall.currentFile}\u2026"
+                            else ->
+                                "Preparing\u2026"
+                        }
                     }
                 }
             }

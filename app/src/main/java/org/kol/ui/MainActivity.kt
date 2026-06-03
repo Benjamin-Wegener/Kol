@@ -7,13 +7,15 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Debug
-import android.os.Handler
-import android.os.Looper
-import android.view.View
+import android.widget.ArrayAdapter
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.drawerlayout.widget.DrawerLayout
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.lifecycle.lifecycleScope
 import com.voiceassistant.ModelConfig
 import com.voiceassistant.R
@@ -28,9 +30,10 @@ import kotlin.math.roundToInt
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private val drawerLayout: DrawerLayout get() = binding.root as DrawerLayout
     private val vm: MainViewModel by viewModels()
-    private val statsHandler = Handler(Looper.getMainLooper())
-    private var statsRunnable: Runnable? = null
+    private val chatAdapter = ChatAdapter()
+    private lateinit var chatsAdapter: ArrayAdapter<String>
     private var lastTotalCpu: Long = 0L
     private var lastIdleCpu: Long = 0L
 
@@ -46,10 +49,32 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         binding.btnClear.setOnClickListener { vm.clearHistory() }
+        binding.btnSettings.setOnClickListener { showDeviceStatsDialog() }
+        binding.btnLanguage.setOnClickListener { showLanguageDialog() }
+        binding.rvChat.layoutManager = LinearLayoutManager(this).apply {
+            stackFromEnd = true
+        }
+        binding.rvChat.adapter = chatAdapter
+        chatsAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf())
+        binding.lvChats.adapter = chatsAdapter
+        binding.lvChats.setOnItemClickListener { _, _, position, _ ->
+            val conversationId = vm.conversations.value.getOrNull(position)?.id ?: return@setOnItemClickListener
+            vm.selectConversation(conversationId)
+            drawerLayout.closeDrawers()
+        }
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (drawerLayout.isDrawerOpen(android.view.Gravity.START)) {
+                    drawerLayout.closeDrawers()
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
+        })
 
         checkMicPermission()
         observeState()
-        startStatsUpdates()
     }
 
     private fun checkMicPermission() {
@@ -83,27 +108,64 @@ class MainActivity : AppCompatActivity() {
         }
         lifecycleScope.launch {
             vm.transcript.collectLatest { text ->
-                if (text.isNotBlank()) binding.tvTranscript.text = "You: $text"
+                if (text.isNotBlank()) vm.recordUserMessage(text)
             }
         }
         lifecycleScope.launch {
             vm.response.collectLatest { text ->
-                if (text.isNotBlank()) binding.tvResponse.text = text
+                if (text.isNotBlank()) vm.updateAssistantMessage(text)
+            }
+        }
+        lifecycleScope.launch {
+            vm.state.collectLatest { state ->
+                if (state is VoiceAssistantEngine.State.Listening) {
+                    vm.finishAssistantMessage()
+                }
+            }
+        }
+        lifecycleScope.launch {
+            vm.chatMessages.collectLatest { messages ->
+                chatAdapter.submitList(messages)
+                if (messages.isNotEmpty()) {
+                    binding.rvChat.scrollToPosition(messages.lastIndex)
+                }
+            }
+        }
+        lifecycleScope.launch {
+            vm.conversations.collectLatest { conversations ->
+                chatsAdapter.clear()
+                chatsAdapter.addAll(conversations.map { it.title })
+                chatsAdapter.notifyDataSetChanged()
             }
         }
     }
 
-    private fun startStatsUpdates() {
-        statsRunnable = object : Runnable {
-            override fun run() {
-                updateStats()
-                statsHandler.postDelayed(this, 1000L)
-            }
-        }
-        statsHandler.post(statsRunnable!!)
+    private fun showDeviceStatsDialog() {
+        val stats = buildDeviceStats()
+        AlertDialog.Builder(this)
+            .setTitle("Device stats")
+            .setMessage(stats)
+            .setPositiveButton("Close", null)
+            .show()
     }
 
-    private fun updateStats() {
+    private fun showLanguageDialog() {
+        val options = ModelConfig.LANGUAGE_OPTIONS
+        val labels = options.map { "${it.flag} ${it.label}" }.toTypedArray()
+        val currentId = vm.currentLanguage() ?: "default"
+        val selectedIndex = options.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Assistant language")
+            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                val selected = options[which]
+                vm.setLanguage(selected.languageCode)
+                dialog.dismiss()
+            }
+            .setPositiveButton("Cancel", null)
+            .show()
+    }
+
+    private fun buildDeviceStats(): String {
         val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val memoryInfo = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
         val heapUsedMb = ((Debug.getPss() / 1024f) * 1f).roundToInt()
@@ -111,15 +173,18 @@ class MainActivity : AppCompatActivity() {
         val totalRamMb = (memoryInfo.totalMem / 1_048_576L).toInt()
         val cpuUsage = readCpuUsage()
 
-        val sttProvider = (vm.engineGetWhisperProvider())
+        val llmProvider = (vm.engineGetGemmaProvider())
         val vadProvider = (vm.engineGetVadProvider())
         val ttsProvider = (vm.engineGetTtsProvider())
-        val gpuStatus = listOf(sttProvider, vadProvider, ttsProvider)
-            .joinToString(" / ") { RuntimeProviders.providerLabel(it) }
+        val gpuStatus = "Gemma ${RuntimeProviders.providerLabel(llmProvider)} / " +
+            "VAD ${RuntimeProviders.providerLabel(vadProvider)} / " +
+            "TTS ${RuntimeProviders.providerLabel(ttsProvider)}"
 
-        binding.tvStatsCpu.text = "CPU: ${Runtime.getRuntime().availableProcessors()} cores • ${cpuUsage}% active"
-        binding.tvStatsRam.text = "RAM: ${availRamMb} MB free of ${totalRamMb} MB • App PSS ${heapUsedMb} MB"
-        binding.tvStatsGpu.text = "Backend: $gpuStatus"
+        return buildString {
+            appendLine("CPU: ${Runtime.getRuntime().availableProcessors()} cores • ${cpuUsage}% active")
+            appendLine("RAM: ${availRamMb} MB free of ${totalRamMb} MB • App PSS ${heapUsedMb} MB")
+            appendLine("Backend: $gpuStatus")
+        }.trim()
     }
 
     private fun readCpuUsage(): Int {
@@ -147,46 +212,39 @@ class MainActivity : AppCompatActivity() {
     private fun updateUI(state: VoiceAssistantEngine.State) {
         when (state) {
             is VoiceAssistantEngine.State.Idle -> {
-                binding.tvStatus.text = "Loading…"
+                binding.tvStatus.text = "⏳"
                 binding.tvStatus.setBackgroundResource(R.drawable.kol_chip_background)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_blue_700))
-                binding.orbView.setState(OrbView.OrbState.IDLE)
             }
             is VoiceAssistantEngine.State.Listening -> {
-                binding.tvStatus.text = "Listening"
+                binding.tvStatus.text = "🎧"
                 binding.tvStatus.setBackgroundResource(R.drawable.kol_chip_background)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_blue_700))
-                binding.orbView.setState(OrbView.OrbState.LISTENING)
             }
-            is VoiceAssistantEngine.State.Transcribing -> {
-                binding.tvStatus.text = "Understanding…"
+            is VoiceAssistantEngine.State.Understanding -> {
+                binding.tvStatus.text = "🤔"
                 binding.tvStatus.setBackgroundResource(R.drawable.kol_chip_background)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_blue_700))
-                binding.orbView.setState(OrbView.OrbState.PROCESSING)
             }
             is VoiceAssistantEngine.State.Thinking -> {
-                binding.tvStatus.text = "Thinking…"
+                binding.tvStatus.text = "💬"
                 binding.tvStatus.setBackgroundResource(R.drawable.kol_chip_background)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_blue_700))
-                binding.orbView.setState(OrbView.OrbState.THINKING)
             }
             is VoiceAssistantEngine.State.Speaking -> {
-                binding.tvStatus.text = "Speaking"
+                binding.tvStatus.text = "🔊"
                 binding.tvStatus.setBackgroundResource(R.drawable.kol_chip_background)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_blue_700))
-                binding.orbView.setState(OrbView.OrbState.SPEAKING)
             }
             is VoiceAssistantEngine.State.Error -> {
-                binding.tvStatus.text = "Error: ${state.message}"
+                binding.tvStatus.text = "⚠️"
                 binding.tvStatus.setBackgroundResource(R.drawable.kol_chip_error)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_error))
-                binding.orbView.setState(OrbView.OrbState.IDLE)
             }
         }
     }
 
     override fun onDestroy() {
-        statsRunnable?.let { statsHandler.removeCallbacks(it) }
         super.onDestroy()
     }
 }

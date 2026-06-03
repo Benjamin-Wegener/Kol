@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicLong
 class AudioCapture(
     private val vad: VadDetector,
     private val onUtterance: (FloatArray) -> Unit,
+    private val onUtteranceSegment: (FloatArray) -> Unit,
     private val onSpeechStart: () -> Unit,
     private val onSpeechEnd: () -> Unit
 ) {
@@ -42,6 +43,7 @@ class AudioCapture(
 
     private val isRunning = AtomicBoolean(false)
     private val suspendedUntilMs = AtomicLong(0L)
+    private val bufferLock = Any()
 
     // Ring buffer: ~500ms pre-roll at 16kHz = 8000 shorts
     private val preRollCapacity = (sampleRate * 0.5).toInt()
@@ -80,8 +82,11 @@ class AudioCapture(
             val chunk = ShortArray(ModelConfig.WHISPER_CHUNK_SIZE)
             var inSpeech = false
             var silenceFrames = 0
+            var segmentEmitted = false
             val silenceThresholdFrames = (ModelConfig.VAD_MIN_SILENCE_MS /
                 (1000.0 * ModelConfig.WHISPER_CHUNK_SIZE / sampleRate)).toInt()
+            val segmentThresholdFrames = (300.0 /
+                (1000.0 * ModelConfig.WHISPER_CHUNK_SIZE / sampleRate)).toInt().coerceAtLeast(1)
 
             while (isActive && isRunning.get()) {
                 val read = record.read(chunk, 0, chunk.size)
@@ -90,17 +95,21 @@ class AudioCapture(
                 if (System.currentTimeMillis() < suspendedUntilMs.get()) {
                     inSpeech = false
                     silenceFrames = 0
-                    speechBuffer.clear()
-                    preRollBuffer.clear()
+                    synchronized(bufferLock) {
+                        speechBuffer.clear()
+                        preRollBuffer.clear()
+                    }
                     continue
                 }
 
                 val floatChunk = chunk.take(read).map { it / 32768f }.toFloatArray()
 
                 // Update pre-roll ring buffer (always)
-                floatChunk.forEach { sample ->
-                    if (preRollBuffer.size >= preRollCapacity) preRollBuffer.removeFirst()
-                    preRollBuffer.addLast((sample * 32768).toInt().toShort())
+                synchronized(bufferLock) {
+                    for (i in 0 until read) {
+                        if (preRollBuffer.size >= preRollCapacity) preRollBuffer.removeFirst()
+                        preRollBuffer.addLast(chunk[i])
+                    }
                 }
 
                 val isSpeech = vad.isSpeech(floatChunk)
@@ -110,24 +119,47 @@ class AudioCapture(
                         // Speech started — prepend pre-roll
                         inSpeech = true
                         silenceFrames = 0
-                        speechBuffer.clear()
-                        speechBuffer.addAll(preRollBuffer)
-                        speechBuffer.addAll(chunk.take(read).toList())
+                        segmentEmitted = false
+                        synchronized(bufferLock) {
+                            speechBuffer.clear()
+                            speechBuffer.addAll(preRollBuffer)
+                            for (i in 0 until read) speechBuffer.add(chunk[i])
+                        }
                         onSpeechStart()
                     }
                     isSpeech && inSpeech -> {
                         silenceFrames = 0
-                        speechBuffer.addAll(chunk.take(read).toList())
+                        synchronized(bufferLock) {
+                            for (i in 0 until read) speechBuffer.add(chunk[i])
+                        }
                     }
                     !isSpeech && inSpeech -> {
                         silenceFrames++
-                        speechBuffer.addAll(chunk.take(read).toList())
+                        synchronized(bufferLock) {
+                            for (i in 0 until read) speechBuffer.add(chunk[i])
+                        }
+
+                        if (!segmentEmitted && silenceFrames >= segmentThresholdFrames) {
+                            segmentEmitted = true
+                            val segment = synchronized(bufferLock) {
+                                val res = speechBuffer.map { it / 32768f }.toFloatArray()
+                                speechBuffer.clear()
+                                speechBuffer.addAll(preRollBuffer)
+                                res
+                            }
+                            if (segment.isNotEmpty()) {
+                                onUtteranceSegment(segment)
+                            }
+                        }
 
                         if (silenceFrames >= silenceThresholdFrames) {
                             // Utterance ended
                             inSpeech = false
-                            val utterance = speechBuffer.map { it / 32768f }.toFloatArray()
-                            speechBuffer.clear()
+                            val utterance = synchronized(bufferLock) {
+                                val res = speechBuffer.map { it / 32768f }.toFloatArray()
+                                speechBuffer.clear()
+                                res
+                            }
                             onSpeechEnd()
                             onUtterance(utterance)
                         }
@@ -140,8 +172,10 @@ class AudioCapture(
     fun suspendProcessing(durationMs: Long) {
         val untilMs = System.currentTimeMillis() + durationMs.coerceAtLeast(0L)
         suspendedUntilMs.set(untilMs)
-        speechBuffer.clear()
-        preRollBuffer.clear()
+        synchronized(bufferLock) {
+            speechBuffer.clear()
+            preRollBuffer.clear()
+        }
     }
 
     fun stop() {
