@@ -7,10 +7,7 @@ import com.voiceassistant.ModelConfig
 object RuntimeProviders {
     const val TAG = "RuntimeProviders"
 
-    val speechCandidates: List<String> = buildList {
-        add("nnapi")
-        add("cpu")
-    }
+    val speechCandidates: List<String> = listOf("cpu")
 
     fun preferredSpeechProvider(): String = speechCandidates.first()
 

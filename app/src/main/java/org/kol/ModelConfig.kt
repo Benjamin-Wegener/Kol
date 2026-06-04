@@ -73,6 +73,7 @@ First write a faithful short transcript of what the user said as [user=...].
 Then write the spoken reply as [lang=xx]... where xx is the ISO language code.
 Do not think aloud, explain reasoning, reveal hidden thoughts, or use a thought channel.
 Be concise by default, but give a fuller answer when the user asks for one or the topic needs it.
+Keep spoken replies within the model budget: usually 1-3 short sentences; for stories or longer requests, write at most about 90 words and end cleanly. If more is useful, offer to continue.
 No markdown, no bullet points, no code unless asked."""
     }
 
@@ -90,7 +91,7 @@ No markdown, no bullet points, no code unless asked."""
     // TTS
     const val TTS_SAMPLE_RATE     = 44100
     const val TTS_SPEED           = 1.0f
-    const val TTS_NUM_STEPS       = 6
+    const val TTS_NUM_STEPS       = 4
 
     // Sentence batcher — flush to TTS on these chars
     val SENTENCE_ENDINGS = setOf('.', '?', '!', '。', '？', '！', '…')

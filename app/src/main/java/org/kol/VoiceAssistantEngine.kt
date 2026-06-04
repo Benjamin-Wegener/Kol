@@ -72,6 +72,10 @@ class VoiceAssistantEngine(private val context: Context) {
     private val ttsFeedBuffer = StringBuilder()
     private var ttsFeedTokenCount = 0
     private var ttsFeedStarted = false
+    private val ttsInitialWordCap = 5
+    private val ttsRollingWordCap = 9
+    private val ttsInitialCharCap = 36
+    private val ttsRollingCharCap = 84
 
     private fun resetTtsFeedBuffer() {
         synchronized(ttsFeedLock) {
@@ -105,51 +109,74 @@ class VoiceAssistantEngine(private val context: Context) {
         // A token that becomes empty after stripping markup should be skipped entirely
         if (cleanToken.isEmpty()) return
         synchronized(ttsFeedLock) {
+            if (cleanToken.firstOrNull()?.isWhitespace() == true && shouldFlushAtWordBoundaryLocked()) {
+                flushTtsFeedBufferLocked(final = false)
+            }
+
             ttsFeedBuffer.append(cleanToken)
             ttsFeedTokenCount += 1
 
-            val current = ttsFeedBuffer.toString()
-            val lastChar = current.trimEnd().lastOrNull()
-
-            // Determine whether the buffer content is ready to flush.
-            // Primary signal: sentence-ending punctuation after a non-trivial chunk.
-            val sentenceEnding = lastChar in setOf('.', '?', '!')
-            val clauseEnding   = lastChar in setOf(',', ':', ';')
-            val trimmedLen = current.trim().length
-
-            val readyBySentence = sentenceEnding && trimmedLen >= 8
-            val readyByClause   = clauseEnding   && trimmedLen >= 25
-            // Hard cap: flush when we have accumulated many tokens even without punctuation
-            val readyByHardCap  = ttsFeedTokenCount >= 30 && lastChar?.isLetterOrDigit() != true
-
-            if (readyBySentence || readyByClause || readyByHardCap) {
-                val chunk = current.trim()
-                if (chunk.isNotBlank()) {
-                    Log.d(TAG, "TTS feed flush started=$ttsFeedStarted tokens=$ttsFeedTokenCount chars=${chunk.length} text=${chunk.take(120)}")
-                    ttsSentenceQueue.trySend(TtsQueueItem.Sentence(chunk))
-                    ttsFeedStarted = true
-                }
-                ttsFeedBuffer.clear()
-                ttsFeedTokenCount = 0
+            if (shouldFlushAfterTokenLocked()) {
+                flushTtsFeedBufferLocked(final = false)
             }
         }
     }
 
+    private fun shouldFlushAtWordBoundaryLocked(): Boolean {
+        val current = ttsFeedBuffer.toString()
+        val trimmed = current.trim()
+        if (trimmed.length < 12) return false
+        val words = countWords(trimmed)
+        val wordCap = if (ttsFeedStarted) ttsRollingWordCap else ttsInitialWordCap
+        val charCap = if (ttsFeedStarted) ttsRollingCharCap else ttsInitialCharCap
+        return words >= wordCap || trimmed.length >= charCap
+    }
+
+    private fun shouldFlushAfterTokenLocked(): Boolean {
+        val current = ttsFeedBuffer.toString()
+        val trimmed = current.trim()
+        val lastChar = trimmed.lastOrNull() ?: return false
+        val sentenceEnding = lastChar in setOf('.', '?', '!', '。', '？', '！', '…')
+        val clauseEnding = lastChar in setOf(',', ':', ';')
+        val readyBySentence = sentenceEnding && trimmed.length >= 8
+        val readyByClause = clauseEnding && trimmed.length >= if (ttsFeedStarted) 30 else 18
+        return readyBySentence || readyByClause
+    }
+
     private fun flushTtsFeedBuffer() {
         synchronized(ttsFeedLock) {
-            // Use the full normalising stripThinkingMarkup here because this is the end-of-turn
-            // path where collapsing whitespace is harmless and desirable for clean TTS input.
-            val chunk = stripThinkingMarkup(ttsFeedBuffer.toString())
-                .replace(Regex("^\\[?lang\\s*=?\\s*[a-z]{2,3}\\s*]?", RegexOption.IGNORE_CASE), "")
-                .trim()
-            if (chunk.isNotBlank()) {
-                Log.d(TAG, "TTS feed final flush chars=${chunk.length} text=${chunk.take(120)}")
-                ttsSentenceQueue.trySend(TtsQueueItem.Sentence(chunk))
-            }
-            ttsFeedBuffer.clear()
-            ttsFeedTokenCount = 0
+            flushTtsFeedBufferLocked(final = true)
             ttsFeedStarted = false
         }
+    }
+
+    private fun flushTtsFeedBufferLocked(final: Boolean) {
+        val chunk = if (final) {
+            cleanTtsChunk(stripThinkingMarkup(ttsFeedBuffer.toString()))
+        } else {
+            cleanTtsChunk(ttsFeedBuffer.toString())
+        }
+        if (chunk.isNotBlank()) {
+            val label = if (final) "TTS feed final flush" else "TTS feed flush"
+            Log.d(TAG, "$label started=$ttsFeedStarted tokens=$ttsFeedTokenCount chars=${chunk.length} text=${chunk.take(120)}")
+            ttsSentenceQueue.trySend(TtsQueueItem.Sentence(chunk))
+            ttsFeedStarted = true
+        }
+        ttsFeedBuffer.clear()
+        ttsFeedTokenCount = 0
+    }
+
+    private fun cleanTtsChunk(text: String): String {
+        return text
+            .replace(Regex("(?i)^\\s*\\]?\\s*\\[?\\s*lang\\s*=?\\s*[a-z]{2,3}\\s*]?\\s*"), "")
+            .replace(Regex("^\\s*]+\\s*"), "")
+            .trim()
+    }
+
+    private fun countWords(text: String): Int {
+        return Regex("[\\p{L}\\p{N}]+(?:['’\\-][\\p{L}\\p{N}]+)*")
+            .findAll(text)
+            .count()
     }
 
     private var detectedLanguage = "en"
@@ -216,33 +243,27 @@ class VoiceAssistantEngine(private val context: Context) {
                     onSpeechEnd    = ::onSpeechEnd
                 )
 
-                capture!!.start()
+                scope.launch {
+                    drainLlmQueue()
+                }
+                scope.launch {
+                    drainTtsQueue()
+                }
 
-                // Load Gemma first (fast, ~40ms) so the GPU warmup run can
-                // start before TTS begins its slow (~70s cold) model load.
                 Log.d(TAG, "Prewarming Gemma LiteRT-LM")
-                ensureGemma()
+                val currentGemma = ensureGemma()
 
-                // Run GPU warmup inference and TTS model load+warmup in
-                // parallel — saves ~1-2s on every cold start by overlapping
-                // the GPU shader JIT compilation with the TTS ONNX load.
-                val gemmaGpuWarmup = async(Dispatchers.IO) {
-                    Log.d(TAG, "GPU warmup run — discarded dummy inference to JIT-compile shaders")
-                    val silenceWav = toWavBytes(
-                        FloatArray(ModelConfig.STT_SAMPLE_RATE) { 0f }, // 1s silence
-                        ModelConfig.STT_SAMPLE_RATE
-                    )
-                    val currentGemma = ensureGemma()
+                val gemmaTextWarmup = async(Dispatchers.IO) {
+                    Log.d(TAG, "Gemma text warmup — discarded prompt and response")
                     try {
-                        currentGemma?.generateFromAudio(
-                            audioWavBytes   = silenceWav,
-                            onToken         = { /* discard warmup output */ },
-                            onUserText      = { /* discard */ },
-                            onLanguage      = { /* discard */ },
-                            onDone          = { Log.d(TAG, "GPU warmup run complete — shaders compiled") }
+                        currentGemma?.generateFromText(
+                            prompt = "hello",
+                            onToken = { /* discard warmup output */ },
+                            onLanguage = { /* discard */ }
                         )
+                        Log.d(TAG, "Gemma text warmup complete")
                     } catch (e: Exception) {
-                        Log.w(TAG, "GPU warmup run failed (non-fatal): ${e.message}")
+                        Log.w(TAG, "Gemma text warmup failed (non-fatal): ${e.message}")
                     } finally {
                         currentGemma?.clearHistory()
                     }
@@ -253,16 +274,11 @@ class VoiceAssistantEngine(private val context: Context) {
                     ensureTts()?.warmUp(preferredLanguageCode ?: "de")
                 }
 
-                awaitAll(gemmaGpuWarmup, ttsWarmup)
+                awaitAll(gemmaTextWarmup, ttsWarmup)
 
                 _state.value = State.Listening
                 Log.d(TAG, "Engine ready")
-                scope.launch {
-                    drainLlmQueue()
-                }
-                scope.launch {
-                    drainTtsQueue()
-                }
+                capture!!.start()
             } catch (e: Exception) {
                 Log.e(TAG, "Init failed", e)
                 _state.value = State.Error("Failed to load models: ${e.message}")
