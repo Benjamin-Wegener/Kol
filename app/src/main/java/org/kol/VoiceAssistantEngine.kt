@@ -6,17 +6,22 @@ import com.voiceassistant.audio.AudioCapture
 import com.voiceassistant.audio.AudioPlayer
 import com.voiceassistant.audio.VadDetector
 import com.voiceassistant.llm.GemmaLiteRtInference
-import com.voiceassistant.llm.SentenceBatcher
+
 import com.voiceassistant.tts.MultilingualTTS
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Orchestrates the full pipeline:
@@ -65,12 +70,57 @@ class VoiceAssistantEngine(private val context: Context) {
     private val ttsMutex = Mutex()
     private val llmSentenceQueue = Channel<FloatArray>(Channel.UNLIMITED)
     private val ttsSentenceQueue = Channel<TtsQueueItem>(Channel.UNLIMITED)
+    private val ttsFeedLock = Any()
+    private val ttsFeedBuffer = StringBuilder()
+    private var ttsFeedTokenCount = 0
+    private var ttsFeedStarted = false
 
-    private val sentenceBatcher = SentenceBatcher(
-        onSentenceReady = { sentence ->
-            ttsSentenceQueue.trySend(TtsQueueItem.Sentence(sentence))
+    private fun resetTtsFeedBuffer() {
+        synchronized(ttsFeedLock) {
+            ttsFeedBuffer.clear()
+            ttsFeedTokenCount = 0
+            ttsFeedStarted = false
         }
-    )
+    }
+
+    private fun feedTokenToTts(token: String) {
+        val cleanToken = stripThinkingMarkup(token)
+            .replace(Regex("^lang[a-z]{2}\\s*", RegexOption.IGNORE_CASE), "")
+        if (cleanToken.isBlank()) return
+        synchronized(ttsFeedLock) {
+            ttsFeedBuffer.append(cleanToken)
+            ttsFeedTokenCount += 1
+            val current = ttsFeedBuffer.toString()
+            val endsAtWordBoundary = current.lastOrNull()?.isWhitespace() == true
+            val readyForInitialFlush = !ttsFeedStarted && ttsFeedTokenCount >= 3 && endsAtWordBoundary
+            val readyForRollingFlush = ttsFeedStarted && endsAtWordBoundary
+            if (readyForInitialFlush || readyForRollingFlush) {
+                val chunk = current.trim()
+                if (chunk.isNotBlank()) {
+                    Log.d(TAG, "TTS feed flush started=$ttsFeedStarted tokens=$ttsFeedTokenCount chars=${chunk.length} text=${chunk.take(120)}")
+                    ttsSentenceQueue.trySend(TtsQueueItem.Sentence(chunk))
+                    ttsFeedStarted = true
+                }
+                ttsFeedBuffer.clear()
+                ttsFeedTokenCount = 0
+            }
+        }
+    }
+
+    private fun flushTtsFeedBuffer() {
+        synchronized(ttsFeedLock) {
+            val chunk = stripThinkingMarkup(ttsFeedBuffer.toString())
+                .replace(Regex("^lang[a-z]{2}\\s*", RegexOption.IGNORE_CASE), "")
+                .trim()
+            if (chunk.isNotBlank()) {
+                Log.d(TAG, "TTS feed final flush chars=${chunk.length} text=${chunk.take(120)}")
+                ttsSentenceQueue.trySend(TtsQueueItem.Sentence(chunk))
+            }
+            ttsFeedBuffer.clear()
+            ttsFeedTokenCount = 0
+            ttsFeedStarted = false
+        }
+    }
 
     private var detectedLanguage = "en"
     private var turnCounter = 0L
@@ -137,16 +187,43 @@ class VoiceAssistantEngine(private val context: Context) {
                 )
 
                 capture!!.start()
-                _state.value = State.Listening
-                Log.d(TAG, "Engine ready")
-                scope.launch {
-                    Log.d(TAG, "Prewarming Gemma LiteRT-LM")
-                    ensureGemma()
+
+                // Load Gemma first (fast, ~40ms) so the GPU warmup run can
+                // start before TTS begins its slow (~70s cold) model load.
+                Log.d(TAG, "Prewarming Gemma LiteRT-LM")
+                ensureGemma()
+
+                // Run GPU warmup inference and TTS model load+warmup in
+                // parallel — saves ~1-2s on every cold start by overlapping
+                // the GPU shader JIT compilation with the TTS ONNX load.
+                val gemmaGpuWarmup = async(Dispatchers.IO) {
+                    Log.d(TAG, "GPU warmup run — discarded dummy inference to JIT-compile shaders")
+                    val silenceWav = toWavBytes(
+                        FloatArray(ModelConfig.STT_SAMPLE_RATE) { 0f }, // 1s silence
+                        ModelConfig.STT_SAMPLE_RATE
+                    )
+                    try {
+                        ensureGemma()?.generateFromAudio(
+                            audioWavBytes   = silenceWav,
+                            onToken         = { /* discard warmup output */ },
+                            onUserText      = { /* discard */ },
+                            onLanguage      = { /* discard */ },
+                            onDone          = { Log.d(TAG, "GPU warmup run complete — shaders compiled") }
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "GPU warmup run failed (non-fatal): ${e.message}")
+                    }
                 }
-                scope.launch {
+
+                val ttsWarmup = async(Dispatchers.IO) {
                     Log.d(TAG, "Prewarming multilingual TTS")
                     ensureTts()?.warmUp(preferredLanguageCode ?: "de")
                 }
+
+                awaitAll(gemmaGpuWarmup, ttsWarmup)
+
+                _state.value = State.Listening
+                Log.d(TAG, "Engine ready")
                 scope.launch {
                     drainLlmQueue()
                 }
@@ -201,7 +278,7 @@ class VoiceAssistantEngine(private val context: Context) {
 
             _state.value = State.Thinking("")
             _response.value = ""
-            sentenceBatcher.reset()
+            resetTtsFeedBuffer()
             Log.d(TAG, "turn#$turnId starting new assistant turn")
 
             val currentGemma = ensureGemma()
@@ -219,7 +296,7 @@ class VoiceAssistantEngine(private val context: Context) {
                     val current = _response.value + token
                     _response.value = current
                     _state.value = State.Thinking(current)
-                    sentenceBatcher.addToken(token)
+                    feedTokenToTts(token)
                 },
                 onUserText = { userText ->
                     if (userText.isNotBlank()) {
@@ -233,7 +310,7 @@ class VoiceAssistantEngine(private val context: Context) {
                 },
                 onDone = {
                     Log.d(TAG, "turn#$turnId Gemma done; responseBytes=${_response.value.toByteArray().size} responseChars=${_response.value.length}")
-                    sentenceBatcher.done()
+                    flushTtsFeedBuffer()
                     ttsSentenceQueue.trySend(TtsQueueItem.EndOfTurn)
                     if (_state.value !is State.Speaking) {
                         _state.value = State.Listening
@@ -312,14 +389,40 @@ class VoiceAssistantEngine(private val context: Context) {
         playbackTicket += 1
         gemma?.cancel()
         player?.flush()
-        sentenceBatcher.reset()
+        resetTtsFeedBuffer()
         _response.value = ""
     }
 
+    // Limits concurrent TTS synthesis jobs (synthesis + playback of prior sentence in parallel).
+    private val ttsSynthesisSemaphore = Semaphore(2)
+    // Ensures sentences are *played* in order even if synthesis finishes out of order.
+    private val ttsPlaybackMutex = Mutex()
+
     private suspend fun drainTtsQueue() {
+        // pendingJobs tracks Deferred synthesis results in sentence order so we
+        // can await them in order for gapless playback.
+        val pendingJobs = ArrayDeque<Deferred<Unit>>()
+
         for (item in ttsSentenceQueue) {
-            if (item is TtsQueueItem.Sentence) {
-                synthesizeAndStream(item.text)
+            when (item) {
+                is TtsQueueItem.Sentence -> {
+                    // Synthesize concurrently (overlap with ongoing playback).
+                    val job = scope.async(Dispatchers.IO) {
+                        ttsSynthesisSemaphore.acquire()
+                        try {
+                            synthesizeAndStream(item.text)
+                        } finally {
+                            ttsSynthesisSemaphore.release()
+                        }
+                    }
+                    pendingJobs.addLast(job)
+                }
+                is TtsQueueItem.EndOfTurn -> {
+                    // Wait for all queued sentences to finish before next turn.
+                    while (pendingJobs.isNotEmpty()) {
+                        pendingJobs.removeFirst().await()
+                    }
+                }
             }
         }
     }

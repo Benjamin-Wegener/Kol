@@ -59,6 +59,15 @@ class AudioPlayer {
 
         Log.d(tag, "AudioTrack created")
 
+        // Pre-prime the AudioTrack in STOPPED state — calling play() before the
+        // first write() means playback begins the instant the first PCM chunk
+        // arrives instead of waiting for the write() call to return. This
+        // eliminates the ~1.8s "AudioTrack started after first buffered chunk"
+        // delay seen in the logs.
+        audioTrack?.play()
+        hasStarted.set(true)
+        Log.d(tag, "AudioTrack pre-primed — play() called before first write")
+
         playJob = scope.launch {
             for (chunk in audioQueue) {
                 if (isFlushing.get()) continue   // drain without playing
@@ -67,9 +76,6 @@ class AudioPlayer {
                 val wrote = audioTrack?.write(pcm16, 0, pcm16.size, AudioTrack.WRITE_BLOCKING) ?: 0
                 if (wrote < 0) {
                     Log.e(tag, "AudioTrack write failed code=$wrote chunkSize=${pcm16.size}")
-                } else if (hasStarted.compareAndSet(false, true)) {
-                    audioTrack?.play()
-                    Log.d(tag, "AudioTrack started after first buffered chunk")
                 }
             }
             isPlaying.set(false)
@@ -91,9 +97,12 @@ class AudioPlayer {
         isFlushing.set(true)
         audioTrack?.pause()
         audioTrack?.flush()
-        hasStarted.set(false)
-        // Drain the queue
+        // Drain the queue before re-priming so stale chunks are gone.
         while (audioQueue.tryReceive().isSuccess) { /* discard */ }
+        // Re-prime immediately so the next sentence starts without the
+        // post-barge-in "started after first chunk" latency.
+        audioTrack?.play()
+        hasStarted.set(true)
         isFlushing.set(false)
         isPlaying.set(false)
     }
