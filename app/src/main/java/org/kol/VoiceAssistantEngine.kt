@@ -5,6 +5,7 @@ import android.util.Log
 import com.voiceassistant.audio.AudioCapture
 import com.voiceassistant.audio.AudioPlayer
 import com.voiceassistant.audio.VadDetector
+import com.voiceassistant.llm.LiteRtNativeLoader
 import com.voiceassistant.llm.GemmaLiteRtInference
 
 import com.voiceassistant.tts.MultilingualTTS
@@ -237,6 +238,7 @@ class VoiceAssistantEngine(private val context: Context) {
             val lockedCurrent = gemma
             if (lockedCurrent != null) return@withLock lockedCurrent
             try {
+                LiteRtNativeLoader.ensureLoaded()
                 GemmaLiteRtInference(context).also {
                     it.setPreferredLanguage(preferredLanguageCode)
                     it.initialize()

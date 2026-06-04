@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
+    <attribution android:tag="microphone" android:label="@string/attribution_microphone_label" />
+    <attribution android:tag="audio_output" android:label="@string/attribution_audio_output_label" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"

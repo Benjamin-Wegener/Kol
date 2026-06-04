@@ -53,8 +53,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun start() {
-        engine.setPreferredLanguage(AppSettings.getLanguage(getApplication()))
-        engine.initialize()
+        viewModelScope.launch(Dispatchers.IO) {
+            engine.setPreferredLanguage(AppSettings.getLanguage(getApplication()))
+            engine.initialize()
+        }
     }
 
     fun setLanguage(language: String?) {
