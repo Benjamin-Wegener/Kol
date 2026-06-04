@@ -1,5 +1,6 @@
 package com.voiceassistant.ui
 
+import android.content.Context
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -15,6 +16,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
+
+    data class VoiceOption(
+        val id: Int,
+        val code: String,
+        val emoji: String,
+        val meaning: String
+    )
+
+    data class TtsQualityOption(
+        val steps: Int,
+        val label: String,
+        val meaning: String
+    )
 
     val engine = VoiceAssistantEngine(app)
     private val store = ConversationStore(app)
@@ -33,6 +47,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var lastUserText = ""
     private var lastAssistantText = ""
     private var pendingSaveJob: Job? = null
+    private val _voiceId = MutableStateFlow(6)
+    val voiceId: StateFlow<Int> = _voiceId
+    private val _ttsSteps = MutableStateFlow(16)
+    val ttsSteps: StateFlow<Int> = _ttsSteps
 
     init {
         val loaded = store.loadIndex()
@@ -50,6 +68,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             activeConversationMeta = record
             _conversations.value = listOf(record)
         }
+        loadVoiceId(getApplication())
+        loadTtsSteps(getApplication())
     }
 
     fun start() {
@@ -65,6 +85,87 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun currentLanguage(): String? = AppSettings.getLanguage(getApplication())
+
+    fun cycleVoice(context: Context) {
+        selectVoice(context, (_voiceId.value + 1) % 10)
+    }
+
+    fun loadVoiceId(context: Context) {
+        _voiceId.value = AppSettings.getVoiceId(context)
+    }
+
+    fun loadTtsSteps(context: Context) {
+        _ttsSteps.value = AppSettings.getTtsSteps(context)
+    }
+
+    fun voiceBadge(id: Int): String =
+        voiceOption(id).emoji
+
+    fun voiceMeaning(id: Int): String =
+        voiceOption(id).meaning
+
+    fun ttsQualityLabel(steps: Int): String =
+        when (steps) {
+            8 -> "⚡ 8"
+            16 -> "🎚 16"
+            24 -> "✨ 24"
+            else -> "${steps}"
+        }
+
+    fun ttsQualityMeaning(steps: Int): String =
+        ttsQualityOptions().firstOrNull { it.steps == steps }?.meaning ?: "TTS quality"
+
+    fun ttsQualityOptions(): List<TtsQualityOption> = listOf(
+        TtsQualityOption(8, "⚡ Fast", "Faster output, a little rougher"),
+        TtsQualityOption(16, "🎚 Balanced", "Good quality and reasonable speed"),
+        TtsQualityOption(24, "✨ High", "Cleaner speech, slower synthesis")
+    )
+
+    fun selectTtsQuality(context: Context, steps: Int) {
+        val normalized = when (steps) {
+            8, 16, 24 -> steps
+            else -> 16
+        }
+        _ttsSteps.value = normalized
+        AppSettings.setTtsSteps(context, normalized)
+    }
+
+    fun voiceOption(id: Int): VoiceOption = when (id.coerceIn(0, 9)) {
+        0 -> VoiceOption(0, "F1", "👩", "Calm, slightly low tone, composed")
+        1 -> VoiceOption(1, "F2", "👧", "Bright, cheerful, playful, youthful")
+        2 -> VoiceOption(2, "F3", "👩‍💼", "Clear, professional, broadcast-ready")
+        3 -> VoiceOption(3, "F4", "👩‍🦰", "Crisp, confident, expressive")
+        4 -> VoiceOption(4, "F5", "👵", "Kind, gentle, soft-spoken, soothing")
+        5 -> VoiceOption(5, "M1", "👦", "Lively, upbeat, confident")
+        6 -> VoiceOption(6, "M2", "👨", "Deep, calm, serious")
+        7 -> VoiceOption(7, "M3", "🧔", "Polished, authoritative, trustworthy")
+        8 -> VoiceOption(8, "M4", "🧑", "Soft, neutral, youthful, friendly")
+        else -> VoiceOption(9, "M5", "👴", "Warm, soft-spoken, storytelling quality")
+    }
+
+    fun voiceOptions(): List<VoiceOption> = listOf(
+        voiceOption(0),
+        voiceOption(1),
+        voiceOption(2),
+        voiceOption(3),
+        voiceOption(4),
+        voiceOption(5),
+        voiceOption(6),
+        voiceOption(7),
+        voiceOption(8),
+        voiceOption(9)
+    )
+
+    fun selectVoice(context: Context, id: Int) {
+        val normalized = id.coerceIn(0, 9)
+        _voiceId.value = normalized
+        AppSettings.setVoiceId(context, normalized)
+        // MultilingualTTS reads speakerId directly from AppSettings
+        // on the next synthesis call — no engine restart needed.
+        viewModelScope.launch(Dispatchers.IO) {
+            engine.previewVoice()
+        }
+    }
 
     fun clearHistory() {
         engine.clearHistory()
@@ -183,5 +284,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         userMessageId = (messages.maxOfOrNull { it.id } ?: 0L) + 1
         assistantMessageId = userMessageId + 1
         activeAssistantMessageId = messages.lastOrNull { !it.isUser && it.isStreaming }?.id
+    }
+
+    companion object {
+        fun voiceLabel(id: Int): String =
+            if (id < 5) "M${id + 1}" else "F${id - 4}"
     }
 }

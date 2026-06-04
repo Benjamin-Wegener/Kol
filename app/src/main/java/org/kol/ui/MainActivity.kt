@@ -15,6 +15,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.drawerlayout.widget.DrawerLayout
 import androidx.core.content.ContextCompat
+import androidx.core.view.GravityCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.lifecycle.lifecycleScope
 import com.voiceassistant.ModelConfig
@@ -51,6 +52,10 @@ class MainActivity : AppCompatActivity() {
         binding.btnClear.setOnClickListener { vm.clearHistory() }
         binding.btnSettings.setOnClickListener { showDeviceStatsDialog() }
         binding.btnLanguage.setOnClickListener { showLanguageDialog() }
+        binding.btnVoice.setOnClickListener { showVoiceDialog() }
+        binding.btnTtsQuality.setOnClickListener { showTtsQualityDialog() }
+        vm.loadVoiceId(this)
+        vm.loadTtsSteps(this)
         binding.rvChat.layoutManager = LinearLayoutManager(this).apply {
             stackFromEnd = true
         }
@@ -64,7 +69,7 @@ class MainActivity : AppCompatActivity() {
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (drawerLayout.isDrawerOpen(android.view.Gravity.START)) {
+                if (drawerLayout.isDrawerOpen(GravityCompat.START)) {
                     drawerLayout.closeDrawers()
                 } else {
                     isEnabled = false
@@ -138,6 +143,18 @@ class MainActivity : AppCompatActivity() {
                 chatsAdapter.notifyDataSetChanged()
             }
         }
+        lifecycleScope.launch {
+            vm.voiceId.collectLatest { id ->
+                binding.btnVoice.text = vm.voiceBadge(id)
+                binding.btnVoice.contentDescription = "${vm.voiceMeaning(id)}"
+            }
+        }
+        lifecycleScope.launch {
+            vm.ttsSteps.collectLatest { steps ->
+                binding.btnTtsQuality.text = vm.ttsQualityLabel(steps)
+                binding.btnTtsQuality.contentDescription = vm.ttsQualityMeaning(steps)
+            }
+        }
     }
 
     private fun showDeviceStatsDialog() {
@@ -159,6 +176,33 @@ class MainActivity : AppCompatActivity() {
             .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
                 val selected = options[which]
                 vm.setLanguage(selected.languageCode)
+                dialog.dismiss()
+            }
+            .setPositiveButton("Cancel", null)
+            .show()
+    }
+
+    private fun showVoiceDialog() {
+        val options = vm.voiceOptions()
+        val labels = options.map { it.emoji }.toTypedArray()
+        val selectedIndex = options.indexOfFirst { it.id == vm.voiceId.value }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Voice")
+            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                vm.selectVoice(this, options[which].id)
+            }
+            .setPositiveButton("Close", null)
+            .show()
+    }
+
+    private fun showTtsQualityDialog() {
+        val options = vm.ttsQualityOptions()
+        val labels = options.map { "${it.label}  ${it.meaning}" }.toTypedArray()
+        val selectedIndex = options.indexOfFirst { it.steps == vm.ttsSteps.value }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("TTS quality")
+            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                vm.selectTtsQuality(this, options[which].steps)
                 dialog.dismiss()
             }
             .setPositiveButton("Cancel", null)

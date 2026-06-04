@@ -27,7 +27,8 @@ class MultilingualTTS(context: Context) {
     private val tts: OfflineTts
     val provider: String
 
-    private val speakerId = 6
+    @Volatile var speakerId: Int = 6
+    @Volatile var numSteps: Int = ModelConfig.TTS_NUM_STEPS
     private val supportedLanguages = setOf(
         "en", "zh", "de", "fr", "es", "pt", "hi", "it", "ar", "ru", "ja", "ko"
     )
@@ -60,7 +61,7 @@ class MultilingualTTS(context: Context) {
             selectedProvider = provider
             val modelConfig = OfflineTtsModelConfig(
                 supertonic = ttsModelConfig,
-                numThreads = 2,
+                numThreads = Runtime.getRuntime().availableProcessors().coerceAtMost(4),
                 provider = provider,
                 debug = false
             )
@@ -91,7 +92,7 @@ class MultilingualTTS(context: Context) {
             config = GenerationConfig(
                 sid = speakerId,
                 speed = ModelConfig.TTS_SPEED,
-                numSteps = ModelConfig.TTS_NUM_STEPS,
+                numSteps = numSteps,
                 extra = mapOf("lang" to normalizedLanguage)
             )
         )
@@ -131,7 +132,7 @@ class MultilingualTTS(context: Context) {
             config = GenerationConfig(
                 sid = speakerId,
                 speed = ModelConfig.TTS_SPEED,
-                numSteps = ModelConfig.TTS_NUM_STEPS,
+                numSteps = numSteps,
                 extra = mapOf("lang" to normalizedLanguage)
             ),
             callback = callback

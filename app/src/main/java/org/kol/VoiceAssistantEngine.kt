@@ -7,6 +7,7 @@ import com.voiceassistant.audio.AudioPlayer
 import com.voiceassistant.audio.VadDetector
 import com.voiceassistant.llm.LiteRtNativeLoader
 import com.voiceassistant.llm.GemmaLiteRtInference
+import com.voiceassistant.ui.AppSettings
 
 import com.voiceassistant.tts.MultilingualTTS
 import kotlinx.coroutines.channels.Channel
@@ -21,6 +22,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.random.Random
 
 /**
  * Orchestrates the full pipeline:
@@ -33,6 +35,7 @@ import java.util.concurrent.atomic.AtomicLong
 class VoiceAssistantEngine(private val context: Context) {
 
     private val TAG = "VoiceAssistantEngine"
+    private val EXPRESSIONS = listOf("Mhhh.")
     private val scope = CoroutineScope(Dispatchers.IO)
 
     // ── State ──────────────────────────────────────────────────────────────────
@@ -380,6 +383,32 @@ class VoiceAssistantEngine(private val context: Context) {
                 return
             }
 
+            // Play a thinking expression immediately so there's no silence gap
+            val ttsNow = ensureTts()
+            if (ttsNow != null) {
+                applyTtsSettings(ttsNow)
+                val exprCount = Random.nextInt(3)
+                if (exprCount > 0) {
+                    val expr = buildString {
+                        repeat(exprCount) {
+                            if (isNotEmpty()) append(' ')
+                            append(EXPRESSIONS.random())
+                        }
+                    }
+                    val exprSamples = ttsNow.synthesize(expr, preferredLanguageCode ?: detectedLanguage)
+                    if (exprSamples.isNotEmpty()) {
+                        player?.let { p ->
+                            var offset = 0
+                            while (offset < exprSamples.size) {
+                                val end = (offset + 2048).coerceAtMost(exprSamples.size)
+                                p.enqueue(exprSamples.copyOfRange(offset, end))
+                                offset = end
+                            }
+                        }
+                    }
+                }
+            }
+
             Log.d(TAG, "turn#$turnId calling Gemma generateFromAudio")
             currentGemma.generateFromAudio(
                 audioWavBytes = wavBytes,
@@ -443,6 +472,7 @@ class VoiceAssistantEngine(private val context: Context) {
                 _state.value = State.Listening
                 return
             }
+            applyTtsSettings(ttsEngine)
             val spokenLanguage = preferredLanguageCode ?: detectedLanguage
             Log.d(TAG, "TTS speak lang=$spokenLanguage text=${spokenSentence.take(120)}")
             val samples = ttsEngine.synthesize(spokenSentence, spokenLanguage)
@@ -506,6 +536,7 @@ class VoiceAssistantEngine(private val context: Context) {
             _state.value = State.Listening
             return
         }
+        applyTtsSettings(ttsEngine)
         val spokenLanguage = preferredLanguageCode ?: detectedLanguage
         val ticket = playbackTicket + 1
         playbackTicket = ticket
@@ -533,6 +564,36 @@ class VoiceAssistantEngine(private val context: Context) {
             if (playbackTicket == ticket && _state.value is State.Speaking) {
                 _state.value = State.Listening
             }
+        }
+    }
+
+    suspend fun previewVoice() {
+        try {
+            val ttsEngine = ensureTts()
+            if (ttsEngine == null) {
+                Log.w(TAG, "Skipping voice preview because multilingual TTS is unavailable")
+                return
+            }
+            applyTtsSettings(ttsEngine)
+            val previewText = "Hello."
+            val spokenLanguage = preferredLanguageCode ?: detectedLanguage
+            val samples = ttsEngine.synthesize(previewText, spokenLanguage)
+            if (samples.isEmpty()) {
+                Log.w(TAG, "Voice preview produced no samples")
+                return
+            }
+            player?.flush()
+            capture?.suspendProcessing(((samples.size * 1000L) / ttsEngine.sampleRate).coerceAtLeast(250L) + 150L)
+            _state.value = State.Speaking(previewText)
+            enqueueTtsSamples(samples)
+            val playbackDurationMs = ((samples.size * 1000L) / ttsEngine.sampleRate).coerceAtLeast(250L)
+            delay(playbackDurationMs + 150L)
+            if (_state.value is State.Speaking) {
+                _state.value = State.Listening
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Voice preview error", e)
+            _state.value = State.Listening
         }
     }
 
@@ -582,6 +643,11 @@ class VoiceAssistantEngine(private val context: Context) {
         return result
             .replace(Regex("\\s+"), " ")
             .trim()
+    }
+
+    private fun applyTtsSettings(ttsEngine: MultilingualTTS) {
+        ttsEngine.speakerId = AppSettings.getVoiceId(context)
+        ttsEngine.numSteps = AppSettings.getTtsSteps(context)
     }
 
     private fun toWavBytes(samples: FloatArray, sampleRate: Int): ByteArray {
