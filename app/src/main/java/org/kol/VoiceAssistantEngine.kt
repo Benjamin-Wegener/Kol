@@ -10,7 +10,6 @@ import com.voiceassistant.llm.GemmaLiteRtInference
 import com.voiceassistant.tts.MultilingualTTS
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -19,7 +18,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
 
@@ -107,16 +105,6 @@ class VoiceAssistantEngine(private val context: Context) {
         // A token that becomes empty after stripping markup should be skipped entirely
         if (cleanToken.isEmpty()) return
         synchronized(ttsFeedLock) {
-            // Insert a space between the buffered text and the new token only when both sides are
-            // alphanumeric and the token does not already start with whitespace (handles models
-            // that omit the space between subword tokens like "Das"+"ist" → "Das ist").
-            val prevLast = ttsFeedBuffer.lastOrNull()
-            val nextFirst = cleanToken.firstOrNull()
-            val needsSpace = prevLast != null
-                && !cleanToken[0].isWhitespace()
-                && prevLast.isLetterOrDigit()
-                && nextFirst != null && nextFirst.isLetterOrDigit()
-            if (needsSpace) ttsFeedBuffer.append(' ')
             ttsFeedBuffer.append(cleanToken)
             ttsFeedTokenCount += 1
 
@@ -132,7 +120,7 @@ class VoiceAssistantEngine(private val context: Context) {
             val readyBySentence = sentenceEnding && trimmedLen >= 8
             val readyByClause   = clauseEnding   && trimmedLen >= 25
             // Hard cap: flush when we have accumulated many tokens even without punctuation
-            val readyByHardCap  = ttsFeedTokenCount >= 30
+            val readyByHardCap  = ttsFeedTokenCount >= 30 && lastChar?.isLetterOrDigit() != true
 
             if (readyBySentence || readyByClause || readyByHardCap) {
                 val chunk = current.trim()
@@ -438,36 +426,13 @@ class VoiceAssistantEngine(private val context: Context) {
         _response.value = ""
     }
 
-    // Limits concurrent TTS synthesis jobs (synthesis + playback of prior sentence in parallel).
-    private val ttsSynthesisSemaphore = Semaphore(2)
-    // Ensures sentences are *played* in order even if synthesis finishes out of order.
-    private val ttsPlaybackMutex = Mutex()
-
     private suspend fun drainTtsQueue() {
-        // pendingJobs tracks Deferred synthesis results in sentence order so we
-        // can await them in order for gapless playback.
-        val pendingJobs = ArrayDeque<Deferred<Unit>>()
-
         for (item in ttsSentenceQueue) {
             when (item) {
                 is TtsQueueItem.Sentence -> {
-                    // Synthesize concurrently (overlap with ongoing playback).
-                    val job = scope.async(Dispatchers.IO) {
-                        ttsSynthesisSemaphore.acquire()
-                        try {
-                            synthesizeAndStream(item.text)
-                        } finally {
-                            ttsSynthesisSemaphore.release()
-                        }
-                    }
-                    pendingJobs.addLast(job)
+                    synthesizeAndStream(item.text)
                 }
-                is TtsQueueItem.EndOfTurn -> {
-                    // Wait for all queued sentences to finish before next turn.
-                    while (pendingJobs.isNotEmpty()) {
-                        pendingJobs.removeFirst().await()
-                    }
-                }
+                is TtsQueueItem.EndOfTurn -> Unit
             }
         }
     }
