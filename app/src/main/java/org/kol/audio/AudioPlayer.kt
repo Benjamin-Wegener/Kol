@@ -10,7 +10,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -28,6 +30,9 @@ class AudioPlayer {
     private var playJob: Job? = null
     private var audioTrack: AudioTrack? = null
     val isPlaying = AtomicBoolean(false)
+    private var framesBufferedBeforeStart = 0
+    private var totalFramesWritten = 0L
+    private var playbackHeadAtStart = 0L
 
     private val scope = CoroutineScope(Dispatchers.IO)
 
@@ -59,23 +64,32 @@ class AudioPlayer {
 
         Log.d(tag, "AudioTrack created")
 
-        // Pre-prime the AudioTrack in STOPPED state — calling play() before the
-        // first write() means playback begins the instant the first PCM chunk
-        // arrives instead of waiting for the write() call to return. This
-        // eliminates the ~1.8s "AudioTrack started after first buffered chunk"
-        // delay seen in the logs.
-        audioTrack?.play()
-        hasStarted.set(true)
-        Log.d(tag, "AudioTrack pre-primed — play() called before first write")
-
         playJob = scope.launch {
-            for (chunk in audioQueue) {
-                if (isFlushing.get()) continue   // drain without playing
+            while (isActive) {
+                val chunk = withTimeoutOrNull(IDLE_CHECK_MS) {
+                    audioQueue.receive()
+                }
+                if (chunk == null) {
+                    pauseIfPlaybackDrained()
+                    continue
+                }
+                if (isFlushing.get()) continue
                 isPlaying.set(true)
                 val pcm16 = chunk.toPcm16()
                 val wrote = audioTrack?.write(pcm16, 0, pcm16.size, AudioTrack.WRITE_BLOCKING) ?: 0
                 if (wrote < 0) {
                     Log.e(tag, "AudioTrack write failed code=$wrote chunkSize=${pcm16.size}")
+                } else {
+                    totalFramesWritten += wrote.toLong()
+                    if (!hasStarted.get()) {
+                        framesBufferedBeforeStart += wrote
+                    }
+                    if (!hasStarted.get() && framesBufferedBeforeStart >= START_PREROLL_FRAMES) {
+                        playbackHeadAtStart = audioTrack?.playbackHeadPosition?.toLong() ?: 0L
+                        audioTrack?.play()
+                        hasStarted.set(true)
+                        Log.d(tag, "AudioTrack started after preroll frames=$framesBufferedBeforeStart")
+                    }
                 }
             }
             isPlaying.set(false)
@@ -99,10 +113,10 @@ class AudioPlayer {
         audioTrack?.flush()
         // Drain the queue before re-priming so stale chunks are gone.
         while (audioQueue.tryReceive().isSuccess) { /* discard */ }
-        // Re-prime immediately so the next sentence starts without the
-        // post-barge-in "started after first chunk" latency.
-        audioTrack?.play()
-        hasStarted.set(true)
+        framesBufferedBeforeStart = 0
+        totalFramesWritten = 0L
+        playbackHeadAtStart = 0L
+        hasStarted.set(false)
         isFlushing.set(false)
         isPlaying.set(false)
     }
@@ -124,5 +138,31 @@ class AudioPlayer {
             out[i] = (sample * Short.MAX_VALUE).toInt().toShort()
         }
         return out
+    }
+
+    private fun pauseIfPlaybackDrained() {
+        val track = audioTrack ?: return
+        if (!hasStarted.get()) {
+            isPlaying.set(false)
+            return
+        }
+        val playedFrames = (track.playbackHeadPosition.toLong() - playbackHeadAtStart).coerceAtLeast(0L)
+        val pendingFrames = (totalFramesWritten - playedFrames).coerceAtLeast(0L)
+        if (pendingFrames <= DRAINED_PENDING_FRAMES) {
+            track.pause()
+            track.flush()
+            hasStarted.set(false)
+            framesBufferedBeforeStart = 0
+            totalFramesWritten = 0L
+            playbackHeadAtStart = 0L
+            isPlaying.set(false)
+            Log.d(tag, "AudioTrack paused after drain")
+        }
+    }
+
+    companion object {
+        private const val START_PREROLL_FRAMES = 4096
+        private const val DRAINED_PENDING_FRAMES = 1024
+        private const val IDLE_CHECK_MS = 60L
     }
 }
