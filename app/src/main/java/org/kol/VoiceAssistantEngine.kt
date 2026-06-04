@@ -72,10 +72,10 @@ class VoiceAssistantEngine(private val context: Context) {
     private val ttsFeedBuffer = StringBuilder()
     private var ttsFeedTokenCount = 0
     private var ttsFeedStarted = false
-    private val ttsInitialWordCap = 5
-    private val ttsRollingWordCap = 9
-    private val ttsInitialCharCap = 36
-    private val ttsRollingCharCap = 84
+    private val ttsInitialWordCap = 18
+    private val ttsRollingWordCap = 24
+    private val ttsInitialCharCap = 140
+    private val ttsRollingCharCap = 180
 
     private fun resetTtsFeedBuffer() {
         synchronized(ttsFeedLock) {
@@ -116,6 +116,8 @@ class VoiceAssistantEngine(private val context: Context) {
             ttsFeedBuffer.append(cleanToken)
             ttsFeedTokenCount += 1
 
+            flushCompleteSentencePrefixesLocked()
+
             if (shouldFlushAfterTokenLocked()) {
                 flushTtsFeedBufferLocked(final = false)
             }
@@ -138,8 +140,8 @@ class VoiceAssistantEngine(private val context: Context) {
         val lastChar = trimmed.lastOrNull() ?: return false
         val sentenceEnding = lastChar in setOf('.', '?', '!', '。', '？', '！', '…')
         val clauseEnding = lastChar in setOf(',', ':', ';')
-        val readyBySentence = sentenceEnding && trimmed.length >= 8
-        val readyByClause = clauseEnding && trimmed.length >= if (ttsFeedStarted) 30 else 18
+        val readyBySentence = sentenceEnding && trimmed.length >= 3 && trimmed.any { it.isLetterOrDigit() }
+        val readyByClause = clauseEnding && trimmed.length >= 18
         return readyBySentence || readyByClause
     }
 
@@ -156,14 +158,53 @@ class VoiceAssistantEngine(private val context: Context) {
         } else {
             cleanTtsChunk(ttsFeedBuffer.toString())
         }
+        enqueueTtsChunkLocked(
+            chunk = chunk,
+            tokenCount = ttsFeedTokenCount,
+            label = if (final) "TTS feed final flush" else "TTS feed flush"
+        )
+        ttsFeedBuffer.clear()
+        ttsFeedTokenCount = 0
+    }
+
+    private fun flushCompleteSentencePrefixesLocked() {
+        while (true) {
+            val endIndex = firstCompleteSentencePrefixEndIndex(ttsFeedBuffer.toString())
+            if (endIndex < 0) return
+
+            val prefix = cleanTtsChunk(ttsFeedBuffer.substring(0, endIndex + 1))
+            val prefixTokenCount = countWords(prefix)
+            ttsFeedBuffer.delete(0, endIndex + 1)
+            ttsFeedTokenCount = countWords(ttsFeedBuffer.toString())
+
+            enqueueTtsChunkLocked(
+                chunk = prefix,
+                tokenCount = prefixTokenCount,
+                label = "TTS feed prefix flush"
+            )
+        }
+    }
+
+    private fun firstCompleteSentencePrefixEndIndex(text: String): Int {
+        val sentenceEndings = setOf('.', '?', '!', '。', '？', '！', '…')
+        for (index in text.indices) {
+            val char = text[index]
+            if (char !in sentenceEndings) continue
+            val nextChar = text.getOrNull(index + 1) ?: continue
+            if (!nextChar.isWhitespace()) continue
+            val prefix = cleanTtsChunk(text.substring(0, index + 1))
+            if (prefix.length < 3 || !prefix.any { it.isLetterOrDigit() }) continue
+            if (text.substring(index + 1).isNotBlank()) return index
+        }
+        return -1
+    }
+
+    private fun enqueueTtsChunkLocked(chunk: String, tokenCount: Int, label: String) {
         if (chunk.isNotBlank()) {
-            val label = if (final) "TTS feed final flush" else "TTS feed flush"
-            Log.d(TAG, "$label started=$ttsFeedStarted tokens=$ttsFeedTokenCount chars=${chunk.length} text=${chunk.take(120)}")
+            Log.d(TAG, "$label started=$ttsFeedStarted tokens=$tokenCount chars=${chunk.length} text=${chunk.take(120)}")
             ttsSentenceQueue.trySend(TtsQueueItem.Sentence(chunk))
             ttsFeedStarted = true
         }
-        ttsFeedBuffer.clear()
-        ttsFeedTokenCount = 0
     }
 
     private fun cleanTtsChunk(text: String): String {
