@@ -337,17 +337,35 @@ class GemmaLiteRtInference(private val context: Context) {
             .replace(Regex("(?is)<think>.*?</think>"), " ")
             .trimStart()
 
-        val userMatch = Regex("^\\[user=([^\\]]*)\\]").find(withoutThinking)
+        // Consume any leading [lang=xx] / lang=xx tags FIRST so that a model that emits
+        // "[lang=de][user=hello]Hallo" is handled correctly.  The leading-lang result is
+        // kept as a fallback in case no later lang tag is found.
+        val leadingConsumed = consumeLeadingLanguageTags(withoutThinking)
+        val leadingLanguage = leadingConsumed.language
+        val afterLeadingLang = leadingConsumed.remaining
+
+        // Match [user=...] anchored to the START of the text that remains after the leading lang
+        // tags have been removed.  The ^ anchor is preserved – we do NOT allow [user=...] to
+        // match later inside assistant-visible text.
+        val userMatch = Regex("^\\[user=([^\\]]*)\\]").find(afterLeadingLang)
         val afterUser = if (userMatch != null) {
-            withoutThinking.removeRange(userMatch.range).trimStart()
+            afterLeadingLang.removeRange(userMatch.range).trimStart()
         } else {
-            withoutThinking
+            afterLeadingLang
         }
 
+        // Consume language tags that follow the [user=...] prefix (or that appear right after the
+        // leading lang when there was no user tag).  If none are present, fall back to the leading
+        // language detected above so language detection is never lost.
         val consumedLanguageTags = consumeLeadingLanguageTags(afterUser)
-        val language = consumedLanguageTags.language
+        val language = consumedLanguageTags.language ?: leadingLanguage
+
+        // waiting: either the lang-consumer says it’s mid-tag, or we have an open bracket at the
+        // very start of the still-to-parse text that hasn’t been closed yet.
         val waitingForPrefixCompletion = consumedLanguageTags.waitingForTag ||
+            leadingConsumed.waitingForTag ||
             (language == null && withoutThinking.startsWith("[") && !withoutThinking.contains("]"))
+
         val userText = userMatch?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
         val visibleCandidate = when {
             language != null -> consumedLanguageTags.remaining

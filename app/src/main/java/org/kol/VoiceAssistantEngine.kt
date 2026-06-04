@@ -83,18 +83,58 @@ class VoiceAssistantEngine(private val context: Context) {
         }
     }
 
+    /**
+     * Removes thinking markup and leading lang-tag noise while preserving all whitespace so that
+     * token spacing like " ist" is not destroyed.  Unlike stripThinkingMarkup() this helper does
+     * NOT call trim() or collapse internal spaces.
+     */
+    private fun cleanTokenForBuffer(token: String): String {
+        // Drop any complete <think>…</think> block but leave surrounding whitespace intact
+        var t = token.replace(Regex("(?is)<think>.*?</think>"), "")
+        // Drop standalone open/close think tags
+        t = t.replace(Regex("(?im)^\\s*</?think>\\s*$"), "")
+        t = t.replace(Regex("(?i)\\[/?think]"), "")
+        // If an unclosed <think> starts here the whole token is markup – suppress it
+        if (t.contains(Regex("(?i)<think")) && !t.contains(Regex("(?i)</think>"))) return ""
+        // Strip a leading [lang=xx] / lang=xx / langXX noise tag that sometimes arrives as the
+        // very first token.  The regex is anchored and does NOT collapse the rest of the string.
+        t = t.replace(Regex("^\\[?lang\\s*=?\\s*[a-z]{2,3}\\s*]?", RegexOption.IGNORE_CASE), "")
+        return t
+    }
+
     private fun feedTokenToTts(token: String) {
-        val cleanToken = stripThinkingMarkup(token)
-            .replace(Regex("^lang[a-z]{2}\\s*", RegexOption.IGNORE_CASE), "")
-        if (cleanToken.isBlank()) return
+        val cleanToken = cleanTokenForBuffer(token)
+        // A token that becomes empty after stripping markup should be skipped entirely
+        if (cleanToken.isEmpty()) return
         synchronized(ttsFeedLock) {
+            // Insert a space between the buffered text and the new token only when both sides are
+            // alphanumeric and the token does not already start with whitespace (handles models
+            // that omit the space between subword tokens like "Das"+"ist" → "Das ist").
+            val prevLast = ttsFeedBuffer.lastOrNull()
+            val nextFirst = cleanToken.firstOrNull()
+            val needsSpace = prevLast != null
+                && !cleanToken[0].isWhitespace()
+                && prevLast.isLetterOrDigit()
+                && nextFirst != null && nextFirst.isLetterOrDigit()
+            if (needsSpace) ttsFeedBuffer.append(' ')
             ttsFeedBuffer.append(cleanToken)
             ttsFeedTokenCount += 1
+
             val current = ttsFeedBuffer.toString()
-            val endsAtWordBoundary = current.lastOrNull()?.isWhitespace() == true
-            val readyForInitialFlush = !ttsFeedStarted && ttsFeedTokenCount >= 3 && endsAtWordBoundary
-            val readyForRollingFlush = ttsFeedStarted && endsAtWordBoundary
-            if (readyForInitialFlush || readyForRollingFlush) {
+            val lastChar = current.trimEnd().lastOrNull()
+
+            // Determine whether the buffer content is ready to flush.
+            // Primary signal: sentence-ending punctuation after a non-trivial chunk.
+            val sentenceEnding = lastChar in setOf('.', '?', '!')
+            val clauseEnding   = lastChar in setOf(',', ':', ';')
+            val trimmedLen = current.trim().length
+
+            val readyBySentence = sentenceEnding && trimmedLen >= 8
+            val readyByClause   = clauseEnding   && trimmedLen >= 25
+            // Hard cap: flush when we have accumulated many tokens even without punctuation
+            val readyByHardCap  = ttsFeedTokenCount >= 30
+
+            if (readyBySentence || readyByClause || readyByHardCap) {
                 val chunk = current.trim()
                 if (chunk.isNotBlank()) {
                     Log.d(TAG, "TTS feed flush started=$ttsFeedStarted tokens=$ttsFeedTokenCount chars=${chunk.length} text=${chunk.take(120)}")
@@ -109,8 +149,10 @@ class VoiceAssistantEngine(private val context: Context) {
 
     private fun flushTtsFeedBuffer() {
         synchronized(ttsFeedLock) {
+            // Use the full normalising stripThinkingMarkup here because this is the end-of-turn
+            // path where collapsing whitespace is harmless and desirable for clean TTS input.
             val chunk = stripThinkingMarkup(ttsFeedBuffer.toString())
-                .replace(Regex("^lang[a-z]{2}\\s*", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("^\\[?lang\\s*=?\\s*[a-z]{2,3}\\s*]?", RegexOption.IGNORE_CASE), "")
                 .trim()
             if (chunk.isNotBlank()) {
                 Log.d(TAG, "TTS feed final flush chars=${chunk.length} text=${chunk.take(120)}")
@@ -202,8 +244,9 @@ class VoiceAssistantEngine(private val context: Context) {
                         FloatArray(ModelConfig.STT_SAMPLE_RATE) { 0f }, // 1s silence
                         ModelConfig.STT_SAMPLE_RATE
                     )
+                    val currentGemma = ensureGemma()
                     try {
-                        ensureGemma()?.generateFromAudio(
+                        currentGemma?.generateFromAudio(
                             audioWavBytes   = silenceWav,
                             onToken         = { /* discard warmup output */ },
                             onUserText      = { /* discard */ },
@@ -212,6 +255,8 @@ class VoiceAssistantEngine(private val context: Context) {
                         )
                     } catch (e: Exception) {
                         Log.w(TAG, "GPU warmup run failed (non-fatal): ${e.message}")
+                    } finally {
+                        currentGemma?.clearHistory()
                     }
                 }
 
