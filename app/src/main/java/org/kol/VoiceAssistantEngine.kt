@@ -111,6 +111,8 @@ class VoiceAssistantEngine(private val context: Context) {
         // A token that becomes empty after stripping markup should be skipped entirely
         if (cleanToken.isEmpty()) return
         synchronized(ttsFeedLock) {
+            // Keep the first assistant words moving quickly: if the model starts a new word
+            // after we've already buffered enough text, flush the current chunk before appending.
             if (cleanToken.firstOrNull()?.isWhitespace() == true && shouldFlushAtWordBoundaryLocked()) {
                 flushTtsFeedBufferLocked(final = false)
             }
@@ -118,6 +120,8 @@ class VoiceAssistantEngine(private val context: Context) {
             ttsFeedBuffer.append(cleanToken)
             ttsFeedTokenCount += 1
 
+            // Flush as soon as we have a complete sentence prefix so the user hears the
+            // answer start without waiting for the full completion.
             flushCompleteSentencePrefixesLocked()
 
             if (shouldFlushAfterTokenLocked()) {
