@@ -294,9 +294,6 @@ class VoiceAssistantEngine(private val context: Context) {
                 )
 
                 scope.launch {
-                    drainLlmQueue()
-                }
-                scope.launch {
                     drainTtsQueue()
                 }
 
@@ -361,10 +358,12 @@ class VoiceAssistantEngine(private val context: Context) {
             Log.d(TAG, "Dropping utterance because another turn is already active")
             return
         }
-        val result = llmSentenceQueue.trySend(samples)
-        if (result.isFailure) {
-            activeTurn.set(false)
-            Log.w(TAG, "Failed to enqueue utterance for processing")
+        scope.launch {
+            try {
+                processUtterance(samples)
+            } finally {
+                activeTurn.set(false)
+            }
         }
     }
 

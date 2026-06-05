@@ -69,6 +69,7 @@ functional; call-workflow logic is not yet implemented.
 - Keep Gemma in no-thinking mode while still allowing longer, fuller answers when useful.
 - Make the launcher icon and in-app logo match `logo_v1.png` exactly.
 - Rebuild after each pass, then verify the chat surface and audio handoff on device.
+- Move all secondary buttons from the main screen into an overflow menu (three-dot / hamburger), keeping the primary interaction surface clean.
 
 ---
 
