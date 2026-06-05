@@ -8,7 +8,7 @@ APP_JNI_DIR="$ROOT_DIR/app/src/main/jniLibs/arm64-v8a"
 
 mkdir -p "$THIRD_PARTY_DIR"
 
-if [ ! -d "$SHERPA_DIR/.git" ]; then
+if [ ! -d "$SHERPA_DIR" ]; then
   git clone --depth 1 https://github.com/k2-fsa/sherpa-onnx "$SHERPA_DIR"
 fi
 
