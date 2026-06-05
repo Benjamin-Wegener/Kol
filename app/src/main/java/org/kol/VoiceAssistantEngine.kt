@@ -22,7 +22,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicLong
-import kotlin.random.Random
 
 /**
  * Orchestrates the full pipeline:
@@ -35,7 +34,6 @@ import kotlin.random.Random
 class VoiceAssistantEngine(private val context: Context) {
 
     private val TAG = "VoiceAssistantEngine"
-    private val EXPRESSIONS = listOf("Hmm.", "Uh-huh.", "Right.", "Okay.", "Let me think…")
     private val scope = CoroutineScope(Dispatchers.IO)
 
     // ── State ──────────────────────────────────────────────────────────────────
@@ -381,15 +379,6 @@ class VoiceAssistantEngine(private val context: Context) {
                 Log.w(TAG, "Gemma LiteRT-LM unavailable on demand; keeping existing model file and continuing without LLM")
                 _state.value = State.Error("repair_required:gemma")
                 return
-            }
-
-            // Play a thinking expression immediately so there's no silence gap
-            if (ensureTts() != null) {
-                val exprCount = Random.nextInt(2) + 1
-                val expr = (1..exprCount).joinToString(" ") { EXPRESSIONS.random() }
-                scope.launch {
-                    synthesizeAndStream(expr)
-                }
             }
 
             Log.d(TAG, "turn#$turnId calling Gemma generateFromAudio")

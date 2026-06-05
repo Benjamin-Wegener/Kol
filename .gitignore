@@ -79,3 +79,4 @@ vendor/
 coverage/
 .cache/
 tmp/
+/kol-single-turn-10-step-plan.md
