@@ -337,7 +337,7 @@ class VoiceAssistantEngine(private val context: Context) {
     private fun onUtteranceSegmentReady(samples: FloatArray) {
         if (samples.isNotEmpty()) {
             Log.d(TAG, "onUtteranceSegmentReady samples=${samples.size} approxMs=${1000.0 * samples.size / ModelConfig.STT_SAMPLE_RATE}")
-            llmSentenceQueue.trySend(samples)
+            // Keep the legacy segment callback for now, but do not let it start a turn.
         }
     }
 
@@ -385,6 +385,7 @@ class VoiceAssistantEngine(private val context: Context) {
                 return
             }
 
+            currentGemma.clearHistory()
             Log.d(TAG, "turn#$turnId calling Gemma generateFromAudio")
             currentGemma.generateFromAudio(
                 audioWavBytes = wavBytes,

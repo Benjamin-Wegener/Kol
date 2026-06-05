@@ -147,10 +147,7 @@ class AudioCapture(
                         if (!segmentEmitted && silenceFrames >= segmentThresholdFrames) {
                             segmentEmitted = true
                             val segment = synchronized(bufferLock) {
-                                val res = speechBuffer.map { it / 32768f }.toFloatArray()
-                                speechBuffer.clear()
-                                speechBuffer.addAll(preRollBuffer)
-                                res
+                                speechBuffer.map { it / 32768f }.toFloatArray()
                             }
                             if (segment.isNotEmpty()) {
                                 Log.d(tag, "utterance#$utteranceCounter segment-ready samples=${segment.size} approxMs=${1000.0 * segment.size / sampleRate}")
@@ -168,11 +165,7 @@ class AudioCapture(
                             }
                             Log.d(tag, "utterance#$utteranceCounter utterance-end samples=${utterance.size} approxMs=${1000.0 * utterance.size / sampleRate}")
                             onSpeechEnd()
-                            if (!segmentEmitted) {
-                                onUtterance(utterance)
-                            } else {
-                                Log.d(tag, "utterance#$utteranceCounter suppressing utterance-end enqueue because segment already sent")
-                            }
+                            onUtterance(utterance)
                         }
                     }
                 }
