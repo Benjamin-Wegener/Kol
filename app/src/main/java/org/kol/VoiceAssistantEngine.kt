@@ -35,7 +35,7 @@ import kotlin.random.Random
 class VoiceAssistantEngine(private val context: Context) {
 
     private val TAG = "VoiceAssistantEngine"
-    private val EXPRESSIONS = listOf("Mhhh.")
+    private val EXPRESSIONS = listOf("Hmm.", "Uh-huh.", "Right.", "Okay.", "Let me think…")
     private val scope = CoroutineScope(Dispatchers.IO)
 
     // ── State ──────────────────────────────────────────────────────────────────
@@ -384,28 +384,11 @@ class VoiceAssistantEngine(private val context: Context) {
             }
 
             // Play a thinking expression immediately so there's no silence gap
-            val ttsNow = ensureTts()
-            if (ttsNow != null) {
-                applyTtsSettings(ttsNow)
-                val exprCount = Random.nextInt(3)
-                if (exprCount > 0) {
-                    val expr = buildString {
-                        repeat(exprCount) {
-                            if (isNotEmpty()) append(' ')
-                            append(EXPRESSIONS.random())
-                        }
-                    }
-                    val exprSamples = ttsNow.synthesize(expr, preferredLanguageCode ?: detectedLanguage)
-                    if (exprSamples.isNotEmpty()) {
-                        player?.let { p ->
-                            var offset = 0
-                            while (offset < exprSamples.size) {
-                                val end = (offset + 2048).coerceAtMost(exprSamples.size)
-                                p.enqueue(exprSamples.copyOfRange(offset, end))
-                                offset = end
-                            }
-                        }
-                    }
+            if (ensureTts() != null) {
+                val exprCount = Random.nextInt(2) + 1
+                val expr = (1..exprCount).joinToString(" ") { EXPRESSIONS.random() }
+                scope.launch {
+                    synthesizeAndStream(expr)
                 }
             }
 
@@ -438,7 +421,6 @@ class VoiceAssistantEngine(private val context: Context) {
                     }
                 }
             )
-            currentGemma.clearHistory()
         } catch (e: Exception) {
             Log.e(TAG, "Pipeline error", e)
             _state.value = State.Error(e.message ?: "Unknown error")

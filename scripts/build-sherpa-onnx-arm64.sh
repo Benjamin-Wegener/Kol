@@ -23,6 +23,15 @@ else
 fi
 
 pushd "$SHERPA_DIR" >/dev/null
+# Fix "CMake Error: The current CMakeCache.txt directory ... is different than the directory ..."
+# This happens if the project was moved.
+if [ -f "build-android-arm64-v8a/CMakeCache.txt" ]; then
+  if ! grep -q "CMAKE_CACHEFILE_DIR:INTERNAL=$(pwd)/build-android-arm64-v8a" "build-android-arm64-v8a/CMakeCache.txt"; then
+    echo "Stale CMakeCache.txt found (likely project was moved). Cleaning build directory..."
+    rm -rf "build-android-arm64-v8a"
+  fi
+fi
+
 ./build-android-arm64-v8a.sh
 popd >/dev/null
 

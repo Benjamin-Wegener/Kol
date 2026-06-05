@@ -44,20 +44,21 @@ class GemmaLiteRtInference(private val context: Context) {
     suspend fun initialize() = withContext(Dispatchers.IO) {
         if (engine != null && conversation != null) return@withContext
 
+        val numThreads = Runtime.getRuntime().availableProcessors().coerceAtMost(4)
         val backendAttempts = listOf(
             "gpu" to Backend.GPU(),
-            "cpu" to Backend.CPU()
+            "cpu" to Backend.CPU(numOfThreads = numThreads)
         )
 
         var lastError: Throwable? = null
         for ((label, backend) in backendAttempts) {
             try {
                 enableSpeculativeDecoding()
-                Log.d(tag, "Initializing Gemma LiteRT-LM with backend=$label model=$modelPath")
+                Log.d(tag, "Initializing Gemma LiteRT-LM with backend=$label model=$modelPath threads=$numThreads")
                 val engineConfig = EngineConfig(
                     modelPath = modelPath,
                     backend = backend,
-                    audioBackend = Backend.CPU(),
+                    audioBackend = Backend.CPU(numOfThreads = numThreads),
                     maxNumTokens = ModelConfig.GEMMA_MAX_TOKENS,
                     cacheDir = context.cacheDir.absolutePath
                 )
@@ -179,7 +180,7 @@ class GemmaLiteRtInference(private val context: Context) {
                             continuation.resume(Unit)
                         }
                     },
-                    emptyMap()
+                    mapOf("clear_kv_cache_before_prefill" to false)
                 )
             }
         }
@@ -250,7 +251,7 @@ class GemmaLiteRtInference(private val context: Context) {
                             continuation.resume(Unit)
                         }
                     },
-                    emptyMap()
+                    mapOf("clear_kv_cache_before_prefill" to false)
                 )
             }
         }
