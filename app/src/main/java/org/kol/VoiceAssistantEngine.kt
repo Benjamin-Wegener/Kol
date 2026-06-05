@@ -8,45 +8,39 @@ import com.voiceassistant.audio.VadDetector
 import com.voiceassistant.llm.LiteRtNativeLoader
 import com.voiceassistant.llm.GemmaLiteRtInference
 import com.voiceassistant.ui.AppSettings
-
 import com.voiceassistant.tts.MultilingualTTS
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import java.util.concurrent.atomic.AtomicLong
-import kotlin.random.Random
 
 /**
  * Orchestrates the full pipeline:
  *
- *   Mic → VAD → Gemma 4 E2B (LiteRT-LM) →
- *   SentenceBatcher → multilingual TTS → Speaker
+ *   Mic → VAD → Gemma 4 E2B (LiteRT-LM) → multilingual TTS → Speaker
  *
- * Barge-in: VAD fires during TTS playback → cancel LLM + flush audio → new utterance
+ * One turn at a time.  processUtterance guards with tryLock; if a turn is
+ * already running the new utterance is dropped.  The pipeline is a single
+ * linear suspend function — no queues, no drain loops, no timers.
+ *
+ * Barge-in: VAD fires during TTS playback → cancel LLM + flush audio → new utterance.
  */
 class VoiceAssistantEngine(private val context: Context) {
 
     private val TAG = "VoiceAssistantEngine"
-    private val EXPRESSIONS = listOf("Hmm.", "Uh-huh.", "Right.", "Okay.", "Let me think…")
     private val scope = CoroutineScope(Dispatchers.IO)
 
     // ── State ──────────────────────────────────────────────────────────────────
 
     sealed class State {
-        object Idle : State()
-        object Listening : State()
+        object Idle          : State()
+        object Listening     : State()
         object Understanding : State()
         data class Thinking(val partial: String) : State()
-        data class Speaking(val text: String) : State()
-        data class Error(val message: String) : State()
+        data class Speaking(val text: String)    : State()
+        data class Error(val message: String)    : State()
     }
 
     private val _state = MutableStateFlow<State>(State.Idle)
@@ -55,10 +49,15 @@ class VoiceAssistantEngine(private val context: Context) {
     private val _transcript = MutableStateFlow("")
     val transcript: StateFlow<String> = _transcript
 
+    // Emits a non-blank placeholder the moment a turn starts (before any LLM token),
+    // so the user bubble is always inserted before the assistant bubble.
+    private val _pendingUserTranscript = MutableStateFlow("")
+    val pendingUserTranscript: StateFlow<String> = _pendingUserTranscript
+
     private val _response = MutableStateFlow("")
     val response: StateFlow<String> = _response
 
-    // ── Components (lazy init after models are ready) ──────────────────────────
+    // ── Components ────────────────────────────────────────────────────────────
 
     private var vad: VadDetector? = null
     private var gemma: GemmaLiteRtInference? = null
@@ -66,261 +65,34 @@ class VoiceAssistantEngine(private val context: Context) {
     private var player: AudioPlayer? = null
     private var capture: AudioCapture? = null
     private var ttsUnavailable = false
+
     @Volatile
     private var preferredLanguageCode: String? = null
-    private val gemmaMutex = Mutex()
-    private val ttsMutex = Mutex()
-    private val llmSentenceQueue = Channel<FloatArray>(Channel.UNLIMITED)
-    private val ttsSentenceQueue = Channel<TtsQueueItem>(Channel.UNLIMITED)
-    private val ttsFeedLock = Any()
-    private val ttsFeedBuffer = StringBuilder()
-    private var ttsFeedTokenCount = 0
-    private var ttsFeedStarted = false
-    private val ttsInitialWordCap = 18
-    private val ttsRollingWordCap = 24
-    private val ttsInitialCharCap = 140
-    private val ttsRollingCharCap = 180
-
-    private fun resetTtsFeedBuffer() {
-        synchronized(ttsFeedLock) {
-            ttsFeedBuffer.clear()
-            ttsFeedTokenCount = 0
-            ttsFeedStarted = false
-        }
-    }
-
-    /**
-     * Removes thinking markup and leading lang-tag noise while preserving all whitespace so that
-     * token spacing like " ist" is not destroyed.  Unlike stripThinkingMarkup() this helper does
-     * NOT call trim() or collapse internal spaces.
-     */
-    private fun cleanTokenForBuffer(token: String): String {
-        // Drop any complete <think>…</think> block but leave surrounding whitespace intact
-        var t = token.replace(Regex("(?is)<think>.*?</think>"), "")
-        // Drop standalone open/close think tags
-        t = t.replace(Regex("(?im)^\\s*</?think>\\s*$"), "")
-        t = t.replace(Regex("(?i)\\[/?think]"), "")
-        // If an unclosed <think> starts here the whole token is markup – suppress it
-        if (t.contains(Regex("(?i)<think")) && !t.contains(Regex("(?i)</think>"))) return ""
-        // Strip a leading [lang=xx] / lang=xx / langXX noise tag that sometimes arrives as the
-        // very first token.  The regex is anchored and does NOT collapse the rest of the string.
-        t = t.replace(Regex("^\\[?lang\\s*=?\\s*[a-z]{2,3}\\s*]?", RegexOption.IGNORE_CASE), "")
-        return t
-    }
-
-    private fun feedTokenToTts(token: String) {
-        val cleanToken = cleanTokenForBuffer(token)
-        // A token that becomes empty after stripping markup should be skipped entirely
-        if (cleanToken.isEmpty()) return
-        synchronized(ttsFeedLock) {
-            if (cleanToken.firstOrNull()?.isWhitespace() == true && shouldFlushAtWordBoundaryLocked()) {
-                flushTtsFeedBufferLocked(final = false)
-            }
-
-            ttsFeedBuffer.append(cleanToken)
-            ttsFeedTokenCount += 1
-
-            flushCompleteSentencePrefixesLocked()
-
-            if (shouldFlushAfterTokenLocked()) {
-                flushTtsFeedBufferLocked(final = false)
-            }
-        }
-    }
-
-    private fun shouldFlushAtWordBoundaryLocked(): Boolean {
-        val current = ttsFeedBuffer.toString()
-        val trimmed = current.trim()
-        if (trimmed.length < 12) return false
-        val words = countWords(trimmed)
-        val wordCap = if (ttsFeedStarted) ttsRollingWordCap else ttsInitialWordCap
-        val charCap = if (ttsFeedStarted) ttsRollingCharCap else ttsInitialCharCap
-        return words >= wordCap || trimmed.length >= charCap
-    }
-
-    private fun shouldFlushAfterTokenLocked(): Boolean {
-        val current = ttsFeedBuffer.toString()
-        val trimmed = current.trim()
-        val lastChar = trimmed.lastOrNull() ?: return false
-        val sentenceEnding = lastChar in setOf('.', '?', '!', '。', '？', '！', '…')
-        val clauseEnding = lastChar in setOf(',', ':', ';')
-        val readyBySentence = sentenceEnding && trimmed.length >= 3 && trimmed.any { it.isLetterOrDigit() }
-        val readyByClause = clauseEnding && trimmed.length >= 18
-        return readyBySentence || readyByClause
-    }
-
-    private fun flushTtsFeedBuffer() {
-        synchronized(ttsFeedLock) {
-            flushTtsFeedBufferLocked(final = true)
-            ttsFeedStarted = false
-        }
-    }
-
-    private fun flushTtsFeedBufferLocked(final: Boolean) {
-        val chunk = if (final) {
-            cleanTtsChunk(stripThinkingMarkup(ttsFeedBuffer.toString()))
-        } else {
-            cleanTtsChunk(ttsFeedBuffer.toString())
-        }
-        enqueueTtsChunkLocked(
-            chunk = chunk,
-            tokenCount = ttsFeedTokenCount,
-            label = if (final) "TTS feed final flush" else "TTS feed flush"
-        )
-        ttsFeedBuffer.clear()
-        ttsFeedTokenCount = 0
-    }
-
-    private fun flushCompleteSentencePrefixesLocked() {
-        while (true) {
-            val endIndex = firstCompleteSentencePrefixEndIndex(ttsFeedBuffer.toString())
-            if (endIndex < 0) return
-
-            val prefix = cleanTtsChunk(ttsFeedBuffer.substring(0, endIndex + 1))
-            val prefixTokenCount = countWords(prefix)
-            ttsFeedBuffer.delete(0, endIndex + 1)
-            ttsFeedTokenCount = countWords(ttsFeedBuffer.toString())
-
-            enqueueTtsChunkLocked(
-                chunk = prefix,
-                tokenCount = prefixTokenCount,
-                label = "TTS feed prefix flush"
-            )
-        }
-    }
-
-    private fun firstCompleteSentencePrefixEndIndex(text: String): Int {
-        val sentenceEndings = setOf('.', '?', '!', '。', '？', '！', '…')
-        for (index in text.indices) {
-            val char = text[index]
-            if (char !in sentenceEndings) continue
-            val nextChar = text.getOrNull(index + 1) ?: continue
-            if (!nextChar.isWhitespace()) continue
-            val prefix = cleanTtsChunk(text.substring(0, index + 1))
-            if (prefix.length < 3 || !prefix.any { it.isLetterOrDigit() }) continue
-            if (text.substring(index + 1).isNotBlank()) return index
-        }
-        return -1
-    }
-
-    private fun enqueueTtsChunkLocked(chunk: String, tokenCount: Int, label: String) {
-        if (chunk.isNotBlank()) {
-            Log.d(TAG, "$label started=$ttsFeedStarted tokens=$tokenCount chars=${chunk.length} text=${chunk.take(120)}")
-            ttsSentenceQueue.trySend(TtsQueueItem.Sentence(chunk))
-            ttsFeedStarted = true
-        }
-    }
-
-    private fun cleanTtsChunk(text: String): String {
-        return text
-            .replace(Regex("(?i)^\\s*\\]?\\s*\\[?\\s*lang\\s*=?\\s*[a-z]{2,3}\\s*]?\\s*"), "")
-            .replace(Regex("^\\s*]+\\s*"), "")
-            .trim()
-    }
-
-    private fun countWords(text: String): Int {
-        return Regex("[\\p{L}\\p{N}]+(?:['’\\-][\\p{L}\\p{N}]+)*")
-            .findAll(text)
-            .count()
-    }
-
     private var detectedLanguage = "en"
-    private var turnCounter = 0L
-    @Volatile
-    private var playbackTicket = 0L
 
-    private sealed class TtsQueueItem {
-        data class Sentence(val text: String) : TtsQueueItem()
-        object EndOfTurn : TtsQueueItem()
-    }
+    // One active turn at a time.  tryLock in processUtterance; unlock in finally.
+    private val activeTurnLock = Mutex()
 
-    private suspend fun ensureGemma(): GemmaLiteRtInference? {
-        val current = gemma
-        if (current != null) return current
-        return gemmaMutex.withLock {
-            val lockedCurrent = gemma
-            if (lockedCurrent != null) return@withLock lockedCurrent
-            try {
-                LiteRtNativeLoader.ensureLoaded()
-                GemmaLiteRtInference(context).also {
-                    it.setPreferredLanguage(preferredLanguageCode)
-                    it.initialize()
-                    gemma = it
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Gemma LiteRT-LM unavailable on demand; continuing without LLM", e)
-                null
-            }
-        }
-    }
-
-    private suspend fun ensureTts(): MultilingualTTS? {
-        val current = kokoro
-        if (current != null) return current
-        if (ttsUnavailable) return null
-        return ttsMutex.withLock {
-            val lockedCurrent = kokoro
-            if (lockedCurrent != null) return@withLock lockedCurrent
-            if (ttsUnavailable) return@withLock null
-            try {
-                MultilingualTTS(context).also { kokoro = it }
-            } catch (e: Exception) {
-                ttsUnavailable = true
-                Log.w(TAG, "Multilingual TTS unavailable on demand; continuing without TTS", e)
-                null
-            }
-        }
-    }
-
-    // ── Lifecycle ──────────────────────────────────────────────────────────────
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     fun initialize() {
         scope.launch {
             try {
                 Log.d(TAG, "Initializing models...")
-                vad     = VadDetector(context)
-                player  = AudioPlayer().also { it.start() }
+                vad    = VadDetector(context)
+                player = AudioPlayer().also { it.start() }
 
                 capture = AudioCapture(
-                    vad = vad!!,
-                    onUtterance    = ::onUtteranceReady,
-                    onUtteranceSegment = ::onUtteranceSegmentReady,
-                    onSpeechStart  = ::onSpeechStart,
-                    onSpeechEnd    = ::onSpeechEnd
+                    vad           = vad!!,
+                    onUtterance   = { samples -> scope.launch { processUtterance(samples) } },
+                    onSpeechStart = ::onSpeechStart,
+                    onSpeechEnd   = ::onSpeechEnd
                 )
 
-                scope.launch {
-                    drainLlmQueue()
-                }
-                scope.launch {
-                    drainTtsQueue()
-                }
+                Log.d(TAG, "Prewarming TTS")
+                ensureTts()?.warmUp(preferredLanguageCode ?: "de")
 
-                Log.d(TAG, "Prewarming Gemma LiteRT-LM")
-                val currentGemma = ensureGemma()
-
-                val gemmaTextWarmup = async(Dispatchers.IO) {
-                    Log.d(TAG, "Gemma text warmup — discarded prompt and response")
-                    try {
-                        currentGemma?.generateFromText(
-                            prompt = "hello",
-                            onToken = { /* discard warmup output */ },
-                            onLanguage = { /* discard */ }
-                        )
-                        Log.d(TAG, "Gemma text warmup complete")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Gemma text warmup failed (non-fatal): ${e.message}")
-                    } finally {
-                        currentGemma?.clearHistory()
-                    }
-                }
-
-                val ttsWarmup = async(Dispatchers.IO) {
-                    Log.d(TAG, "Prewarming multilingual TTS")
-                    ensureTts()?.warmUp(preferredLanguageCode ?: "de")
-                }
-
-                awaitAll(gemmaTextWarmup, ttsWarmup)
+                ensureGemma()
 
                 _state.value = State.Listening
                 Log.d(TAG, "Engine ready")
@@ -332,251 +104,198 @@ class VoiceAssistantEngine(private val context: Context) {
         }
     }
 
-    private fun onUtteranceSegmentReady(samples: FloatArray) {
-        if (samples.isNotEmpty()) {
-            Log.d(TAG, "onUtteranceSegmentReady samples=${samples.size} approxMs=${1000.0 * samples.size / ModelConfig.STT_SAMPLE_RATE}")
-            llmSentenceQueue.trySend(samples)
-        }
-    }
+    // ── Speech callbacks ──────────────────────────────────────────────────────
 
     private fun onSpeechStart() {
-        // User started speaking — if we're currently speaking, barge in
         if (_state.value is State.Speaking) {
-            return
+            bargeIn()
         }
-        _state.value = State.Listening
-    }
-
-    private fun onSpeechEnd() {
         _state.value = State.Understanding
     }
 
-    private fun onUtteranceReady(samples: FloatArray) {
-        Log.d(TAG, "onUtteranceReady samples=${samples.size} approxMs=${1000.0 * samples.size / ModelConfig.STT_SAMPLE_RATE}")
-        llmSentenceQueue.trySend(samples)
+    private fun onSpeechEnd() {
+        // State is owned by processUtteranceLocked.  Nothing to do here.
     }
 
-    private suspend fun drainLlmQueue() {
-        for (samples in llmSentenceQueue) {
-            Log.d(TAG, "drainLlmQueue received samples=${samples.size}")
-            processUtterance(samples)
+    // ── Turn gate ─────────────────────────────────────────────────────────────
+
+    private suspend fun processUtterance(samples: FloatArray) {
+        if (!activeTurnLock.tryLock()) {
+            Log.d(TAG, "turn already active, dropping utterance")
+            return
+        }
+        try {
+            processUtteranceLocked(samples)
+        } finally {
+            activeTurnLock.unlock()
         }
     }
 
-    private suspend fun processUtterance(samples: FloatArray) {
-        try {
-            turnCounter += 1
-            val turnId = turnCounter
-            val wavBytes = toWavBytes(samples, ModelConfig.STT_SAMPLE_RATE)
-            Log.d(TAG, "turn#$turnId audio ready samples=${samples.size} bytes=${wavBytes.size} durationMs=${1000.0 * samples.size / ModelConfig.STT_SAMPLE_RATE}")
-            Log.d(TAG, "turn#$turnId audio sample preview=${samples.take(8)} ... ${samples.takeLast(8)}")
+    // ── Main pipeline ─────────────────────────────────────────────────────────
+    //
+    // One straight line from mic samples to speaker drain.
+    // State transitions happen exactly here, in order, nowhere else.
 
+    private suspend fun processUtteranceLocked(samples: FloatArray) {
+        capture?.mute()
+        try {
+            _pendingUserTranscript.value = "…"
+            _state.value = State.Understanding
+
+            val wavBytes = toWavBytes(samples, ModelConfig.STT_SAMPLE_RATE)
             _state.value = State.Thinking("")
             _response.value = ""
-            resetTtsFeedBuffer()
-            Log.d(TAG, "turn#$turnId starting new assistant turn")
 
             val currentGemma = ensureGemma()
             if (currentGemma == null) {
-                Log.w(TAG, "Gemma LiteRT-LM unavailable on demand; keeping existing model file and continuing without LLM")
+                Log.w(TAG, "Gemma unavailable")
                 _state.value = State.Error("repair_required:gemma")
                 return
             }
 
-            // Play a thinking expression immediately so there's no silence gap
-            if (ensureTts() != null) {
-                val exprCount = Random.nextInt(2) + 1
-                val expr = (1..exprCount).joinToString(" ") { EXPRESSIONS.random() }
-                scope.launch {
-                    synthesizeAndStream(expr)
+            val ttsEngine = ensureTts()
+            if (ttsEngine != null) applyTtsSettings(ttsEngine)
+
+            val responseBuffer = StringBuilder()
+            val ttsBuffer = StringBuilder()
+            var ttsTokenCount = 0
+
+            fun speakChunk(chunk: String) {
+                if (chunk.isBlank()) return
+                val engine = ttsEngine ?: return
+                Log.d(TAG, "TTS CHUNK READY raw=${chunk.take(240)}")
+                _state.value = State.Speaking(chunk)
+                val spoken = stripThinkingMarkup(chunk)
+                if (spoken.isBlank()) {
+                    Log.d(TAG, "TTS CHUNK DROPPED after markup stripping")
+                    return
+                }
+                val lang = preferredLanguageCode ?: detectedLanguage
+                Log.d(TAG, "TTS synthesize lang=$lang text=${spoken.take(120)}")
+                engine.synthesizeStreaming(spoken, lang) { samples ->
+                    enqueueTtsSamples(samples)
+                    true
                 }
             }
 
-            Log.d(TAG, "turn#$turnId calling Gemma generateFromAudio")
+            fun flushTtsBuffer() {
+                val raw = cleanTtsChunk(ttsBuffer.toString())
+                ttsBuffer.clear()
+                ttsTokenCount = 0
+                speakChunk(raw)
+            }
+
+            fun hasShortSentence(text: String): Boolean {
+                val trimmed = text.trimEnd()
+                if (trimmed.isEmpty()) return false
+                return trimmed.last() in charArrayOf('.', '?', '!', '。', '？', '！')
+            }
+
             currentGemma.generateFromAudio(
                 audioWavBytes = wavBytes,
                 onToken = { token ->
-                    Log.d(TAG, "turn#$turnId GEMMA TOKEN: ${token.take(120)}")
-                    val current = _response.value + token
-                    _response.value = current
-                    _state.value = State.Thinking(current)
-                    feedTokenToTts(token)
+                    Log.d(TAG, "ENGINE VISIBLE TOKEN: ${token.take(240)}")
+                    val clean = cleanTokenForTts(token)
+                    Log.d(TAG, "ENGINE CLEAN TTS TOKEN: ${clean.take(240)}")
+                    responseBuffer.append(token)
+                    _response.value = responseBuffer.toString()
+                    _state.value    = State.Thinking(responseBuffer.toString())
+
+                    if (clean.isNotEmpty()) {
+                        ttsBuffer.append(clean)
+                        ttsTokenCount += Regex("[\\p{L}\\p{N}]+(?:[''\\-][\\p{L}\\p{N}]+)*").findAll(clean).count().coerceAtLeast(1)
+                        if (hasShortSentence(ttsBuffer.toString()) || ttsTokenCount >= 5) {
+                            flushTtsBuffer()
+                        }
+                    }
                 },
                 onUserText = { userText ->
                     if (userText.isNotBlank()) {
-                        _transcript.value = userText
-                        Log.d(TAG, "turn#$turnId GEMMA USER TRANSCRIPT=$userText")
+                        Log.d(TAG, "ENGINE USER TRANSCRIPT: ${userText.take(240)}")
+                        _transcript.value            = userText
+                        _pendingUserTranscript.value = userText
                     }
                 },
                 onLanguage = { language ->
+                    Log.d(TAG, "ENGINE LANGUAGE: $language")
                     detectedLanguage = preferredLanguageCode ?: language
-                    Log.d(TAG, "turn#$turnId GEMMA LANGUAGE=$language")
                 },
                 onDone = {
-                    Log.d(TAG, "turn#$turnId Gemma done; responseBytes=${_response.value.toByteArray().size} responseChars=${_response.value.length}")
-                    flushTtsFeedBuffer()
-                    ttsSentenceQueue.trySend(TtsQueueItem.EndOfTurn)
-                    if (_state.value !is State.Speaking) {
-                        _state.value = State.Listening
-                    }
+                    Log.d(TAG, "ENGINE GEMMA DONE")
                 }
             )
+            currentGemma.clearHistory()
+            if (ttsBuffer.isNotEmpty()) {
+                Log.d(TAG, "ENGINE FINAL TTS FLUSH buffer=${ttsBuffer.toString().take(240)}")
+                flushTtsBuffer()
+            }
+
+            player?.awaitDrained()
+            _state.value = State.Listening
         } catch (e: Exception) {
             Log.e(TAG, "Pipeline error", e)
             _state.value = State.Error(e.message ?: "Unknown error")
+        } finally {
+            capture?.unmute()
         }
     }
 
-    fun setPreferredLanguage(languageCode: String?) {
-        preferredLanguageCode = languageCode?.takeIf { it.isNotBlank() && it != "default" && it != "auto" }
-        gemma?.setPreferredLanguage(preferredLanguageCode)
-        detectedLanguage = preferredLanguageCode ?: detectedLanguage
-    }
-
-    fun preferredLanguage(): String? = preferredLanguageCode
-
-    /**
-     * Synthesize a sentence on IO thread, enqueue audio chunks to player.
-     * Runs in parallel with LLM generating the next sentence.
-     */
-    private suspend fun synthesizeAndPlay(sentence: String) {
-        val spokenSentence = stripThinkingMarkup(sentence)
-        if (spokenSentence.isBlank()) {
-            return
-        }
-        if (spokenSentence != sentence) {
-            Log.d(TAG, "Filtered TTS text")
-        }
-        try {
-            val ttsEngine = ensureTts()
-            if (ttsEngine == null) {
-                Log.w(TAG, "Skipping TTS because multilingual TTS is unavailable")
-                _state.value = State.Listening
-                return
-            }
-            applyTtsSettings(ttsEngine)
-            val spokenLanguage = preferredLanguageCode ?: detectedLanguage
-            Log.d(TAG, "TTS speak lang=$spokenLanguage text=${spokenSentence.take(120)}")
-            val samples = ttsEngine.synthesize(spokenSentence, spokenLanguage)
-            if (samples.isNotEmpty()) {
-                Log.d(TAG, "TTS produced samples=${samples.size} approxMs=${1000.0 * samples.size / ttsEngine.sampleRate}")
-                val playbackDurationMs = ((samples.size * 1000L) / ttsEngine.sampleRate)
-                    .coerceAtLeast(250L)
-                val micResumeDelayMs = playbackDurationMs + 150L
-                capture?.suspendProcessing(micResumeDelayMs)
-                _state.value = State.Speaking(spokenSentence)
-                var offset = 0
-                while (offset < samples.size) {
-                    val end = (offset + 2048).coerceAtMost(samples.size)
-                    player?.enqueue(samples.copyOfRange(offset, end))
-                    offset = end
-                }
-                delay(micResumeDelayMs)
-                if (_state.value is State.Speaking) {
-                    _state.value = State.Listening
-                }
-            } else {
-                Log.w(TAG, "TTS produced no samples")
-                _state.value = State.Listening
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "TTS error", e)
-            _state.value = State.Listening
-        }
-    }
-
-    /**
-     * Barge-in: user interrupted. Cancel LLM, flush audio immediately.
-     */
-    private fun bargeIn() {
-        Log.d(TAG, "bargeIn")
-        playbackTicket += 1
-        gemma?.cancel()
-        player?.flush()
-        resetTtsFeedBuffer()
-        _response.value = ""
-    }
-
-    private suspend fun drainTtsQueue() {
-        for (item in ttsSentenceQueue) {
-            when (item) {
-                is TtsQueueItem.Sentence -> {
-                    synthesizeAndStream(item.text)
-                }
-                is TtsQueueItem.EndOfTurn -> Unit
-            }
-        }
-    }
-
-    private suspend fun synthesizeAndStream(sentence: String) {
-        val spokenSentence = stripThinkingMarkup(sentence)
-        if (spokenSentence.isBlank()) {
-            return
-        }
-        val ttsEngine = ensureTts()
-        if (ttsEngine == null) {
-            _state.value = State.Listening
-            return
-        }
-        applyTtsSettings(ttsEngine)
-        val spokenLanguage = preferredLanguageCode ?: detectedLanguage
-        val ticket = playbackTicket + 1
-        playbackTicket = ticket
-        val estimatedDurationMs = estimateSpeechDurationMs(spokenSentence)
-        capture?.suspendProcessing(estimatedDurationMs + 500L)
-        _state.value = State.Speaking(spokenSentence)
-        Log.d(TAG, "TTS stream lang=$spokenLanguage text=${spokenSentence.take(120)}")
-        val samples = ttsEngine.synthesizeStreaming(spokenSentence, spokenLanguage) { chunk ->
-            if (playbackTicket != ticket) {
-                return@synthesizeStreaming false
-            }
-            enqueueTtsSamples(chunk)
-            true
-        }
-        if (samples.isEmpty()) {
-            Log.w(TAG, "Streaming TTS produced no samples")
-            _state.value = State.Listening
-            return
-        }
-        val playbackDurationMs = ((samples.size * 1000L) / ttsEngine.sampleRate).coerceAtLeast(250L)
-        Log.d(TAG, "TTS streamed samples=${samples.size} approxMs=${1000.0 * samples.size / ttsEngine.sampleRate}")
-        capture?.suspendProcessing(playbackDurationMs + 150L)
-        scope.launch {
-            delay(playbackDurationMs + 150L)
-            if (playbackTicket == ticket && _state.value is State.Speaking) {
-                _state.value = State.Listening
-            }
-        }
-    }
+    // ── Voice preview ─────────────────────────────────────────────────────────
 
     suspend fun previewVoice() {
+        val ttsEngine = ensureTts()
+        if (ttsEngine == null) {
+            Log.w(TAG, "Skipping voice preview — TTS unavailable")
+            return
+        }
         try {
-            val ttsEngine = ensureTts()
-            if (ttsEngine == null) {
-                Log.w(TAG, "Skipping voice preview because multilingual TTS is unavailable")
-                return
-            }
             applyTtsSettings(ttsEngine)
-            val previewText = "Hello."
+            val previewText    = "Test."
             val spokenLanguage = preferredLanguageCode ?: detectedLanguage
-            val samples = ttsEngine.synthesize(previewText, spokenLanguage)
+            val samples        = ttsEngine.synthesize(previewText, spokenLanguage)
             if (samples.isEmpty()) {
                 Log.w(TAG, "Voice preview produced no samples")
                 return
             }
             player?.flush()
-            capture?.suspendProcessing(((samples.size * 1000L) / ttsEngine.sampleRate).coerceAtLeast(250L) + 150L)
-            _state.value = State.Speaking(previewText)
-            enqueueTtsSamples(samples)
-            val playbackDurationMs = ((samples.size * 1000L) / ttsEngine.sampleRate).coerceAtLeast(250L)
-            delay(playbackDurationMs + 150L)
-            if (_state.value is State.Speaking) {
+            capture?.mute()
+            try {
+                _state.value = State.Speaking(previewText)
+                enqueueTtsSamples(samples)
+                player?.awaitDrained()
                 _state.value = State.Listening
+            } finally {
+                capture?.unmute()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Voice preview error", e)
             _state.value = State.Listening
         }
+    }
+
+    // ── Barge-in ──────────────────────────────────────────────────────────────
+
+    private fun bargeIn() {
+        Log.d(TAG, "bargeIn")
+        gemma?.cancel()
+        player?.flush()
+        _response.value = ""
+    }
+
+    // ── TTS helpers ───────────────────────────────────────────────────────────
+
+    /**
+     * Cleans a raw Gemma token for the TTS accumulator.
+     * Strips thinking markup and the leading lang-tag noise token.
+     * Does NOT trim or collapse whitespace so that " ist" style spacing is preserved.
+     */
+    private fun cleanTokenForTts(token: String): String {
+        var t = token.replace(Regex("(?is)<think>.*?</think>"), "")
+        t = t.replace(Regex("(?im)^\\s*</?think>\\s*$"), "")
+        t = t.replace(Regex("(?i)\\[/?think]"), "")
+        if (t.contains(Regex("(?i)<think")) && !t.contains(Regex("(?i)</think>"))) return ""
+        t = t.replace(Regex("^\\[?lang\\s*=?\\s*[a-z]{2,3}\\s*]?", RegexOption.IGNORE_CASE), "")
+        return t
     }
 
     private fun enqueueTtsSamples(samples: FloatArray) {
@@ -588,22 +307,78 @@ class VoiceAssistantEngine(private val context: Context) {
         }
     }
 
-    private fun estimateSpeechDurationMs(text: String): Long {
-        val words = text.trim().split(Regex("\\s+")).count { it.isNotBlank() }
-        return ((words * 360L) + 400L).coerceAtLeast(900L)
+    private fun cleanTtsChunk(text: String): String {
+        return text
+            .replace(Regex("(?i)^\\s*\\]?\\s*\\[?\\s*lang\\s*=?\\s*[a-z]{2,3}\\s*]?\\s*"), "")
+            .replace(Regex("^\\s*]+\\s*"), "")
+            .trim()
     }
 
-    fun clearHistory() {
-        scope.launch {
-            ensureGemma()?.clearHistory()
+    private fun stripThinkingMarkup(text: String): String {
+        if (text.contains(Regex("(?i)<think")) && !text.contains(Regex("(?i)</think>"))) return ""
+        var r = text
+        r = r.replace(Regex("(?is)<think>.*?</think>"), " ")
+        r = r.replace(Regex("(?im)^\\s*<think>\\s*$"), " ")
+        r = r.replace(Regex("(?im)^\\s*</think>\\s*$"), " ")
+        r = r.replace(Regex("(?i)\\[/??think\\]"), " ")
+        return r.replace(Regex("\\s+"), " ").trim()
+    }
+
+    private fun applyTtsSettings(ttsEngine: MultilingualTTS) {
+        ttsEngine.speakerId = AppSettings.getVoiceId(context)
+        ttsEngine.numSteps  = AppSettings.getTtsSteps(context)
+    }
+
+    // ── Model init helpers ────────────────────────────────────────────────────
+
+    private suspend fun ensureGemma(): GemmaLiteRtInference? {
+        gemma?.let { return it }
+        return try {
+            LiteRtNativeLoader.ensureLoaded()
+            GemmaLiteRtInference(context).also {
+                it.setPreferredLanguage(preferredLanguageCode)
+                it.initialize()
+                gemma = it
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Gemma unavailable", e)
+            null
         }
-        _transcript.value = ""
-        _response.value = ""
+    }
+
+    private suspend fun ensureTts(): MultilingualTTS? {
+        kokoro?.let { return it }
+        if (ttsUnavailable) return null
+        return try {
+            MultilingualTTS(context).also { kokoro = it }
+        } catch (e: Exception) {
+            ttsUnavailable = true
+            Log.w(TAG, "TTS unavailable", e)
+            null
+        }
+    }
+
+    // ── Public API ────────────────────────────────────────────────────────────
+
+    fun setPreferredLanguage(languageCode: String?) {
+        preferredLanguageCode = languageCode
+            ?.takeIf { it.isNotBlank() && it != "default" && it != "auto" }
+        gemma?.setPreferredLanguage(preferredLanguageCode)
+        detectedLanguage = preferredLanguageCode ?: detectedLanguage
+    }
+
+    fun preferredLanguage(): String? = preferredLanguageCode
+
+    fun clearHistory() {
+        scope.launch { ensureGemma()?.clearHistory() }
+        _transcript.value            = ""
+        _pendingUserTranscript.value = ""
+        _response.value              = ""
     }
 
     fun gemmaProvider(): String = gemma?.backend() ?: "cpu"
-    fun vadProvider(): String = vad?.provider ?: "cpu"
-    fun ttsProvider(): String = kokoro?.provider ?: "cpu"
+    fun vadProvider():   String = vad?.provider    ?: "cpu"
+    fun ttsProvider():   String = kokoro?.provider ?: "cpu"
 
     fun release() {
         capture?.stop()
@@ -613,79 +388,51 @@ class VoiceAssistantEngine(private val context: Context) {
         vad?.release()
     }
 
-    private fun stripThinkingMarkup(text: String): String {
-        if (text.contains(Regex("(?i)<think")) && !text.contains(Regex("(?i)</think>"))) {
-            return ""
-        }
-        var result = text
-        result = result.replace(Regex("(?is)<think>.*?</think>"), " ")
-        result = result.replace(Regex("(?im)^\\s*<think>\\s*$"), " ")
-        result = result.replace(Regex("(?im)^\\s*</think>\\s*$"), " ")
-        result = result.replace(Regex("(?i)\\[/??think\\]"), " ")
-        return result
-            .replace(Regex("\\s+"), " ")
-            .trim()
-    }
-
-    private fun applyTtsSettings(ttsEngine: MultilingualTTS) {
-        ttsEngine.speakerId = AppSettings.getVoiceId(context)
-        ttsEngine.numSteps = AppSettings.getTtsSteps(context)
-    }
+    // ── WAV encoding ──────────────────────────────────────────────────────────
 
     private fun toWavBytes(samples: FloatArray, sampleRate: Int): ByteArray {
         val pcm = ByteArray(samples.size * 2)
         var pcmIndex = 0
         for (sample in samples) {
-            val shortSample = (sample.coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort()
-            pcm[pcmIndex++] = (shortSample.toInt() and 0xff).toByte()
-            pcm[pcmIndex++] = ((shortSample.toInt() shr 8) and 0xff).toByte()
+            val s = (sample.coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort()
+            pcm[pcmIndex++] = (s.toInt() and 0xff).toByte()
+            pcm[pcmIndex++] = ((s.toInt() shr 8) and 0xff).toByte()
         }
-
-        val header = ByteArray(44)
-        val pcmDataSize = pcm.size
-        val wavFileSize = pcmDataSize + 36
-        val channels = 1
+        val channels      = 1
         val bitsPerSample = 16
-        val byteRate = sampleRate * channels * bitsPerSample / 8
-
-        header[0] = 'R'.code.toByte()
-        header[1] = 'I'.code.toByte()
-        header[2] = 'F'.code.toByte()
-        header[3] = 'F'.code.toByte()
-        header[4] = (wavFileSize and 0xff).toByte()
-        header[5] = (wavFileSize shr 8 and 0xff).toByte()
-        header[6] = (wavFileSize shr 16 and 0xff).toByte()
-        header[7] = (wavFileSize shr 24 and 0xff).toByte()
-        header[8] = 'W'.code.toByte()
-        header[9] = 'A'.code.toByte()
-        header[10] = 'V'.code.toByte()
-        header[11] = 'E'.code.toByte()
-        header[12] = 'f'.code.toByte()
-        header[13] = 'm'.code.toByte()
-        header[14] = 't'.code.toByte()
-        header[15] = ' '.code.toByte()
+        val byteRate      = sampleRate * channels * bitsPerSample / 8
+        val pcmDataSize   = pcm.size
+        val wavFileSize   = pcmDataSize + 36
+        val header = ByteArray(44)
+        header[0]  = 'R'.code.toByte(); header[1]  = 'I'.code.toByte()
+        header[2]  = 'F'.code.toByte(); header[3]  = 'F'.code.toByte()
+        header[4]  = (wavFileSize         and 0xff).toByte()
+        header[5]  = (wavFileSize  shr  8 and 0xff).toByte()
+        header[6]  = (wavFileSize  shr 16 and 0xff).toByte()
+        header[7]  = (wavFileSize  shr 24         ).toByte()
+        header[8]  = 'W'.code.toByte(); header[9]  = 'A'.code.toByte()
+        header[10] = 'V'.code.toByte(); header[11] = 'E'.code.toByte()
+        header[12] = 'f'.code.toByte(); header[13] = 'm'.code.toByte()
+        header[14] = 't'.code.toByte(); header[15] = ' '.code.toByte()
         header[16] = 16
         header[20] = 1
         header[22] = channels.toByte()
-        header[24] = (sampleRate and 0xff).toByte()
-        header[25] = (sampleRate shr 8 and 0xff).toByte()
-        header[26] = (sampleRate shr 16 and 0xff).toByte()
-        header[27] = (sampleRate shr 24).toByte()
-        header[28] = (byteRate and 0xff).toByte()
-        header[29] = (byteRate shr 8 and 0xff).toByte()
-        header[30] = (byteRate shr 16 and 0xff).toByte()
-        header[31] = (byteRate shr 24).toByte()
+        header[24] = (sampleRate         and 0xff).toByte()
+        header[25] = (sampleRate  shr  8 and 0xff).toByte()
+        header[26] = (sampleRate  shr 16 and 0xff).toByte()
+        header[27] = (sampleRate  shr 24         ).toByte()
+        header[28] = (byteRate           and 0xff).toByte()
+        header[29] = (byteRate    shr  8 and 0xff).toByte()
+        header[30] = (byteRate    shr 16 and 0xff).toByte()
+        header[31] = (byteRate    shr 24         ).toByte()
         header[32] = (channels * bitsPerSample / 8).toByte()
         header[34] = bitsPerSample.toByte()
-        header[36] = 'd'.code.toByte()
-        header[37] = 'a'.code.toByte()
-        header[38] = 't'.code.toByte()
-        header[39] = 'a'.code.toByte()
-        header[40] = (pcmDataSize and 0xff).toByte()
-        header[41] = (pcmDataSize shr 8 and 0xff).toByte()
-        header[42] = (pcmDataSize shr 16 and 0xff).toByte()
-        header[43] = (pcmDataSize shr 24).toByte()
-
+        header[36] = 'd'.code.toByte(); header[37] = 'a'.code.toByte()
+        header[38] = 't'.code.toByte(); header[39] = 'a'.code.toByte()
+        header[40] = (pcmDataSize         and 0xff).toByte()
+        header[41] = (pcmDataSize  shr  8 and 0xff).toByte()
+        header[42] = (pcmDataSize  shr 16 and 0xff).toByte()
+        header[43] = (pcmDataSize  shr 24         ).toByte()
         return header + pcm
     }
 }

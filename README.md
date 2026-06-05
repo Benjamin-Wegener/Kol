@@ -4,6 +4,231 @@
 
 **Kol** is a local-first Android voice assistant.
 
+## Roadmap
+
+### Target program flow
+
+The app should run as one simple linear voice-turn pipeline, with no extra side tracks, no parallel feature-specific event trees, and no interrupt-heavy orchestration except the absolute minimum state handoff between stages.
+
+1. User speaks.
+2. App records the utterance until end-of-speech is detected.
+3. Recorded audio is sent directly into the LLM.
+4. The LLM handles speech understanding internally and turns the user audio into text inside the model flow itself.
+5. The parser prints the user's spoken words into the user chat bubble.
+6. The assistant bubble is created immediately when the reply starts.
+7. The first spoken chunk for TTS should be at most 5 tokens, unless punctuation arrives earlier, in which case it should be shorter.
+8. TTS starts speaking that first chunk immediately.
+9. The assistant bubble keeps filling with the rest of the LLM answer as tokens continue streaming.
+10. TTS continues reading the rest of the answer in order.
+11. When the answer is done, the app returns to listening status.
+12. Nothing else happens.
+
+### Rules for implementation
+
+- One active turn at a time.
+- One straight program flow from mic input to spoken reply.
+- No extra workflow forms, branch-specific handlers, or feature-specific detours in the main turn loop.
+- No separate STT subsystem if the multimodal LLM already does the transcription internally.
+- User transcript appears only after the model has produced the recognized text.
+- Assistant speech starts as soon as the first short safe chunk is available.
+- The rest of the reply is appended to the same assistant bubble and spoken in the same order.
+- Final state after completion is simply `listening`.
+
+### Current flow — what is wrong
+
+The engine is 689 lines split across two parallel coroutine drain loops (`drainLlmQueue` and
+`drainTtsQueue`) that run independently for the lifetime of the app.
+A voice turn goes through at least four async handoff points before a word is spoken:
+
+```
+AudioCapture callback
+    └─▶ llmSentenceQueue.trySend()          ← async drop into Channel
+            └─▶ drainLlmQueue coroutine
+                    └─▶ processUtterance()
+                            └─▶ Gemma.onToken → feedTokenToTts()
+                                    └─▶ ttsSentenceQueue.trySend()   ← second Channel
+                                            └─▶ drainTtsQueue coroutine
+                                                    └─▶ synthesizeAndStream()
+                                                            └─▶ scope.launch { delay → setState }
+```
+
+Specific problems:
+
+- **Two unbounded `Channel` queues** (`llmSentenceQueue`, `ttsSentenceQueue`) decouple
+  production from consumption in ways that make execution order opaque. If the LLM is slow,
+  segments pile up and the drain loop processes them out of conversational order.
+- **State is set from four different call sites** — `onSpeechStart`, `onSpeechEnd`,
+  `feedTokenToTts`, `synthesizeAndStream`, and a `scope.launch { delay(...) }` timer inside
+  `synthesizeAndStream`. Any of these can clobber each other.
+- **`playbackTicket` / `AtomicLong` / `Mutex` / `synchronized(ttsFeedLock)`** — four separate
+  concurrency guards for what should be one sequential thing. The ticket pattern in particular
+  exists only because multiple coroutines race to write state.
+- **`ttsFeedBuffer` word/char caps** (`ttsInitialWordCap=18`, `ttsRollingWordCap=24`,
+  `ttsInitialCharCap=140`, `ttsRollingCharCap=180`) are a secondary batching layer on top of
+  the token-count trigger, creating two conflicting flush policies for the same buffer.
+- **`synthesizeAndPlay`** (the non-streaming path) and **`synthesizeAndStream`** (the streaming
+  path) both exist and have diverging state-transition logic. Only one should exist.
+- **`drainTtsQueue` ignores `EndOfTurn`** — the item is received and discarded with `Unit`,
+  meaning the turn-end signal does nothing.
+- **Mic resume** is estimated via `estimateSpeechDurationMs()` (a word-count heuristic) and
+  also via `suspendProcessing(playbackDurationMs + 1150L)` called twice in the same path.
+  These two timers overlap and neither is reliable.
+- **`capture?.suspendProcessing(…)` is called inside `synthesizeAndStream`** before synthesis
+  even starts, using an estimate. If TTS is slower or faster than the estimate the mic opens
+  at the wrong time.
+
+### Rewrite plan
+
+Replace the two-channel / two-coroutine engine with one sequential suspend function that
+executes the turn top to bottom inside a single coroutine. Internal concurrency (TTS
+streaming, audio chunking) stays hidden behind `suspend` helpers that return only when their
+stage is done.
+
+**Step 1 — Remove the LLM channel**
+
+`AudioCapture` currently calls `llmSentenceQueue.trySend()`. Replace this with a direct
+call to `processUtterance()` via one dedicated coroutine that reads from the mic callback.
+One utterance at a time; the next one waits until `processUtterance` returns.
+
+**Step 2 — Remove the TTS channel**
+
+Inside `processUtterance`, call TTS directly from the token accumulator instead of
+`ttsSentenceQueue.trySend()`. The accumulator still buffers tokens until a flush condition
+is met, but it calls `synthesizeAndStream()` as a blocking suspend call — the LLM token
+loop simply `runBlocking`-style awaits each chunk before continuing. This forces
+strict order: chunk N is always synthesised before chunk N+1 starts.
+
+**Step 3 — Unify the flush policy**
+
+Delete `ttsInitialWordCap`, `ttsRollingWordCap`, `ttsInitialCharCap`, `ttsRollingCharCap`.
+Keep one rule: flush when token count ≥ 5, or when a punctuation boundary is hit first,
+whichever comes first. No word/char secondary caps.
+
+**Step 4 — Single state writer**
+
+Only `processUtterance` writes `_state`. The sequence is:
+```
+Listening → Understanding → Thinking → Speaking → Listening
+```
+No other function sets state. `feedTokenToTts` and `synthesizeAndStream` do not touch
+`_state` at all — they return results; `processUtterance` sets state from those results.
+
+**Step 5 — Mic mute/unmute at boundaries only**
+
+Stop the mic at the top of `processUtterance`, before calling Gemma. Resume it at the
+bottom, after `player` drains. No estimates, no `suspendProcessing`, no timers.
+
+**Step 6 — Delete dead code**
+
+- Delete `synthesizeAndPlay` (non-streaming path).
+- Delete `drainTtsQueue` and `drainLlmQueue`.
+- Delete `llmSentenceQueue`, `ttsSentenceQueue`, `TtsQueueItem`.
+- Delete `playbackTicket`.
+- Delete `ttsMutex`, `gemmaMutex` (only needed because two coroutines raced; with one they are unnecessary).
+- Delete `ttsInitialWordCap`, `ttsRollingWordCap`, `ttsInitialCharCap`, `ttsRollingCharCap`.
+
+**Target shape of `processUtterance` after rewrite:**
+
+```kotlin
+private suspend fun processUtterance(samples: FloatArray) {
+    capture?.mute()
+    _state.value = State.Understanding
+
+    val wavBytes = toWavBytes(samples, ModelConfig.STT_SAMPLE_RATE)
+    _response.value = ""
+    resetTtsFeedBuffer()
+    _state.value = State.Thinking("")
+
+    gemma.generateFromAudio(
+        audioWavBytes = wavBytes,
+        onToken = { token ->
+            _response.value += token
+            feedTokenToTts(token)   // buffers; suspends + speaks when flush condition met
+        },
+        onUserText = { _transcript.value = it },
+        onLanguage  = { detectedLanguage = preferredLanguageCode ?: it },
+        onDone      = { flushTtsFeedBuffer() }  // flush whatever remains
+    )
+
+    player?.awaitDrained()          // block until all PCM is played
+    capture?.unmute()
+    _state.value = State.Listening
+}
+```
+
+**User bubble timing**
+
+`onUserText` fires when Gemma emits the transcript. The UI observes `_transcript` and
+appends the user bubble at that point — not before, not from a VAD callback.
+
+**Assistant bubble timing**
+
+The assistant bubble is created the moment `_state` transitions to `Thinking`. It grows as
+`_response` accumulates tokens. The bubble is never replaced, only appended to.
+
+---
+
+### Why `processUtterance` must be the single entry point
+
+#### What an utterance is
+
+`AudioCapture` keeps a continuous mic loop running in a background coroutine.
+It feeds every raw 16-bit PCM chunk through Silero VAD frame by frame.
+VAD does not understand words — it only decides, per chunk, whether that chunk contains
+human speech energy or silence.
+
+When VAD flips from silence → speech, `AudioCapture` starts accumulating samples into
+`speechBuffer`, prepended with ~500 ms of pre-roll so the first syllable is never clipped.
+When VAD flips back to silence and silence holds for `VAD_MIN_SILENCE_MS`, the accumulated
+buffer is sealed and the engine calls `onUtterance(samples: FloatArray)`.
+That `FloatArray` is one complete spoken turn by the user — one utterance.
+
+The multimodal Gemma model expects exactly this: a block of raw audio bytes covering one
+complete utterance. It does not accept a stream of small frames; it needs the whole thing
+in one call so it can see the full acoustic context before it produces any output.
+
+#### Why everything hangs on it
+
+`processUtterance` is the function that receives that block and drives every downstream
+stage. Without it nothing happens:
+
+- No utterance → no call to `generateFromAudio` → no tokens → no transcript → no reply → no TTS.
+- The function is the only place that has the audio, so it is also the only right place to
+  open the assistant bubble, start TTS, mute the mic, and transition state.
+- If utterance delivery is async and unbounded (as it currently is via `llmSentenceQueue`),
+  a second utterance can be enqueued before the first one finishes. The model is not
+  re-entrant; the second call to `generateFromAudio` while the first is still running
+  corrupts generation or stalls. Serialising through `processUtterance` as a blocking suspend
+  call makes this impossible by construction.
+
+#### The segment path and why it exists but should not drive the main flow
+
+`AudioCapture` also fires `onUtteranceSegment` after a shorter silence threshold (~300 ms).
+This was added to give the LLM a head start on very long utterances: send the first segment
+while the user is still talking, so Gemma warms up. In practice this creates the race
+described above — a segment arrives, `processUtterance` starts, then the complete utterance
+arrives and is also enqueued. Both end up in `llmSentenceQueue` and both get processed.
+The segment path should be removed or disabled for the default flow. The complete-utterance
+path is sufficient and correct.
+
+#### The suspendProcessing hack and why it must go
+
+Currently `AudioCapture.suspendProcessing(durationMs)` is called from inside
+`synthesizeAndStream` to prevent the mic from picking up the assistant's own voice while it
+is speaking. It works by checking `System.currentTimeMillis() < suspendedUntilMs` at the
+top of every chunk loop iteration and discarding audio while suspended.
+
+The duration is estimated from word count (`estimateSpeechDurationMs`) before synthesis
+even starts, and then adjusted again after synthesis with `playbackDurationMs + 1150L`,
+both times as wall-clock guesses. If TTS is slower than the estimate the mic opens early
+and the assistant hears itself. If it is faster the mic stays closed too long and cuts the
+first word of the user's next turn.
+
+The correct fix is to mute the mic at the start of `processUtterance` (before Gemma runs)
+and unmute it only after `player.awaitDrained()` returns — i.e., after the last PCM sample
+has been sent to the speaker. No estimate, no timer, no `suspendedUntilMs`. The mic is
+closed for exactly the duration of the turn and no longer.
+
 It runs a full speech pipeline entirely on-device: voice activity detection, multimodal
 audio-to-text-to-speech inference, and natural voice output — with no cloud roundtrip,
 no account, and no data leaving the phone.
@@ -62,13 +287,29 @@ functional; call-workflow logic is not yet implemented.
 - Background service / always-on mode
 
 ### Near-term roadmap
-- Keep the conversation pinned to the latest message while still allowing manual scrollback.
-- Stop microphone capture while the assistant is speaking, and resume only after playback ends.
-- Investigate and fix TTS sentence ordering so later snippets do not play before earlier ones.
-- Review shared audio state for races in `VoiceAssistantEngine`, `AudioPlayer`, and playback handoff logic.
-- Keep Gemma in no-thinking mode while still allowing longer, fuller answers when useful.
-- Make the launcher icon and in-app logo match `logo_v1.png` exactly.
-- Rebuild after each pass, then verify the chat surface and audio handoff on device.
+
+All items below serve the single-flow pipeline described at the top of this file.
+Each fix removes something that currently breaks the linear turn or adds junk between stages.
+
+- **Collapse the turn into one top-to-bottom flow** — rewrite `VoiceAssistantEngine` so the
+  voice turn reads as a single straight call chain: record → infer → parse user text → open
+  assistant bubble → chunk first TTS segment → stream rest → speak → set listening. No extra
+  branches, no detached coroutines that write to UI from outside that flow.
+- **Print user transcript at the right moment** — the user bubble should appear when Gemma
+  emits the recognised text, not before, so the UI order always matches the audio order.
+- **First TTS chunk at ≤ 5 tokens** — replace sentence-boundary batching with a token counter
+  that fires TTS as soon as 5 non-punctuation tokens have accumulated, or earlier if a
+  punctuation boundary is hit first. This eliminates the latency spike before first speech.
+- **Fix TTS ordering** — later chunks must never play before earlier ones; enforce strict
+  queue ordering so the spoken output always matches the text in the assistant bubble.
+- **Stop the mic while speaking, resume after** — mute `AudioCapture` for the duration of
+  assistant playback and re-enable it only when the audio queue drains. Barge-in is a
+  separate concern and should not complicate the default no-interrupt path.
+- **Scroll pin** — keep the chat scrolled to the latest message during streaming;
+  allow manual scrollback but snap back to bottom when a new turn starts.
+- **Logo** — make the launcher icon and in-app logo match `logo_v1.png` exactly.
+- **Rebuild and verify on device after each step** — do not stack changes; confirm the
+  audio handoff and chat surface work before moving to the next item.
 
 ---
 

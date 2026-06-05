@@ -127,15 +127,12 @@ class GemmaLiteRtInference(private val context: Context) {
                             }
                             val chunk = message.toString()
                             rawBuffer.append(chunk)
-                            Log.d(tag, "RAW GEMMA CHUNK: ${chunk.take(120)}")
-                            Log.d(tag, "RAW GEMMA BUFFER: ${rawBuffer.toString().take(300)}")
                             val parsed = parseVisibleResponse(rawBuffer.toString())
                             if (parsed.language != null && parsed.language != responseLanguage) {
                                 responseLanguage = parsed.language
                                 onLanguage(responseLanguage)
                             }
                             if (parsed.userText != null) {
-                                Log.d(tag, "RAW GEMMA USER TEXT: ${parsed.userText}")
                                 onUserText(parsed.userText)
                             }
                             if (parsed.visibleText.length > emittedVisibleLength) {
@@ -151,15 +148,11 @@ class GemmaLiteRtInference(private val context: Context) {
                             if (completed) return
                             completed = true
                             val parsed = parseVisibleResponse(rawBuffer.toString())
-                            Log.d(tag, "RAW GEMMA FINAL: ${rawBuffer.toString().take(1000)}")
                             if (parsed.language != null && parsed.language != responseLanguage) {
                                 responseLanguage = parsed.language
                                 onLanguage(responseLanguage)
                             }
-                            if (parsed.userText != null) {
-                                Log.d(tag, "RAW GEMMA FINAL USER TEXT: ${parsed.userText}")
-                                onUserText(parsed.userText)
-                            }
+                            if (parsed.userText != null) onUserText(parsed.userText)
                             if (parsed.visibleText.length > emittedVisibleLength) {
                                 val delta = parsed.visibleText.substring(emittedVisibleLength)
                                 emittedVisibleLength = parsed.visibleText.length
@@ -168,7 +161,6 @@ class GemmaLiteRtInference(private val context: Context) {
                                 }
                             }
                             onDone()
-                            Log.d(tag, "RAW LLM FINAL: ${rawBuffer.toString().take(500)}")
                             continuation.resume(Unit)
                         }
 
@@ -209,9 +201,7 @@ class GemmaLiteRtInference(private val context: Context) {
                             if (cancelRequested.get() || completed) return
                             val chunk = message.toString()
                             rawBuffer.append(chunk)
-                            Log.d(tag, "RAW GEMMA CHUNK: ${chunk.take(120)}")
                             val parsed = parseVisibleResponse(rawBuffer.toString())
-                            Log.d(tag, "RAW GEMMA BUFFER: ${rawBuffer.toString().take(300)}")
                             if (parsed.language != null && parsed.language != responseLanguage) {
                                 responseLanguage = parsed.language
                                 onLanguage(responseLanguage)
@@ -422,4 +412,5 @@ class GemmaLiteRtInference(private val context: Context) {
             waitingForTag = waitingForTag
         )
     }
+
 }

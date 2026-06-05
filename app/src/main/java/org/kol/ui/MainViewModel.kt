@@ -34,6 +34,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val store = ConversationStore(app)
     val state: StateFlow<VoiceAssistantEngine.State> = engine.state
     val transcript: StateFlow<String> = engine.transcript
+    // Emits the moment a turn starts (placeholder "…" then real text) so user bubble
+    // is always inserted before the first assistant token.
+    val pendingUserTranscript: StateFlow<String> = engine.pendingUserTranscript
     val response: StateFlow<String> = engine.response
     private val _chatMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()

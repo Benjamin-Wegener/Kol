@@ -112,7 +112,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         lifecycleScope.launch {
-            vm.transcript.collectLatest { text ->
+            vm.pendingUserTranscript.collectLatest { text ->
                 if (text.isNotBlank()) vm.recordUserMessage(text)
             }
         }
@@ -256,7 +256,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateUI(state: VoiceAssistantEngine.State) {
         when (state) {
             is VoiceAssistantEngine.State.Idle -> {
-                binding.tvStatus.text = "⏳"
+                binding.tvStatus.text = "💤"
                 binding.tvStatus.setBackgroundResource(R.drawable.kol_chip_background)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_blue_700))
             }
@@ -266,17 +266,17 @@ class MainActivity : AppCompatActivity() {
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_blue_700))
             }
             is VoiceAssistantEngine.State.Understanding -> {
-                binding.tvStatus.text = "🤔"
+                binding.tvStatus.text = "👂"
                 binding.tvStatus.setBackgroundResource(R.drawable.kol_chip_background)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_blue_700))
             }
             is VoiceAssistantEngine.State.Thinking -> {
-                binding.tvStatus.text = "💬"
+                binding.tvStatus.text = "🤔"
                 binding.tvStatus.setBackgroundResource(R.drawable.kol_chip_background)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_blue_700))
             }
             is VoiceAssistantEngine.State.Speaking -> {
-                binding.tvStatus.text = "🔊"
+                binding.tvStatus.text = "🗣️"
                 binding.tvStatus.setBackgroundResource(R.drawable.kol_chip_background)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_blue_700))
             }
@@ -285,6 +285,14 @@ class MainActivity : AppCompatActivity() {
                 binding.tvStatus.setBackgroundResource(R.drawable.kol_chip_error)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.kol_error))
             }
+        }
+        binding.tvStatus.contentDescription = when (state) {
+            is VoiceAssistantEngine.State.Idle -> "Idle"
+            is VoiceAssistantEngine.State.Listening -> "Listening"
+            is VoiceAssistantEngine.State.Understanding -> "Understanding"
+            is VoiceAssistantEngine.State.Thinking -> "Thinking"
+            is VoiceAssistantEngine.State.Speaking -> "Speaking"
+            is VoiceAssistantEngine.State.Error -> "Error"
         }
     }
 

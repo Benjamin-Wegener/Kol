@@ -14,7 +14,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicLong  // used by mute/unmute via suspendedUntilMs
 
 /**
  * Continuously captures mic audio, applies AEC + NS, runs Silero VAD.
@@ -26,7 +26,6 @@ import java.util.concurrent.atomic.AtomicLong
 class AudioCapture(
     private val vad: VadDetector,
     private val onUtterance: (FloatArray) -> Unit,
-    private val onUtteranceSegment: (FloatArray) -> Unit,
     private val onSpeechStart: () -> Unit,
     private val onSpeechEnd: () -> Unit
 ) {
@@ -85,11 +84,8 @@ class AudioCapture(
             val chunk = ShortArray(ModelConfig.STT_CHUNK_SIZE)
             var inSpeech = false
             var silenceFrames = 0
-            var segmentEmitted = false
             val silenceThresholdFrames = (ModelConfig.VAD_MIN_SILENCE_MS /
                 (1000.0 * ModelConfig.STT_CHUNK_SIZE / sampleRate)).toInt()
-            val segmentThresholdFrames = (300.0 /
-                (1000.0 * ModelConfig.STT_CHUNK_SIZE / sampleRate)).toInt().coerceAtLeast(1)
 
             while (isActive && isRunning.get()) {
                 val read = record.read(chunk, 0, chunk.size)
@@ -124,7 +120,6 @@ class AudioCapture(
                         Log.d(tag, "utterance#$utteranceCounter speech-start read=$read preRoll=${preRollBuffer.size} chunkMs=${1000.0 * read / sampleRate}")
                         inSpeech = true
                         silenceFrames = 0
-                        segmentEmitted = false
                         synchronized(bufferLock) {
                             speechBuffer.clear()
                             speechBuffer.addAll(preRollBuffer)
@@ -144,20 +139,6 @@ class AudioCapture(
                             for (i in 0 until read) speechBuffer.add(chunk[i])
                         }
 
-                        if (!segmentEmitted && silenceFrames >= segmentThresholdFrames) {
-                            segmentEmitted = true
-                            val segment = synchronized(bufferLock) {
-                                val res = speechBuffer.map { it / 32768f }.toFloatArray()
-                                speechBuffer.clear()
-                                speechBuffer.addAll(preRollBuffer)
-                                res
-                            }
-                            if (segment.isNotEmpty()) {
-                                Log.d(tag, "utterance#$utteranceCounter segment-ready samples=${segment.size} approxMs=${1000.0 * segment.size / sampleRate}")
-                                onUtteranceSegment(segment)
-                            }
-                        }
-
                         if (silenceFrames >= silenceThresholdFrames) {
                             // Utterance ended
                             inSpeech = false
@@ -168,11 +149,7 @@ class AudioCapture(
                             }
                             Log.d(tag, "utterance#$utteranceCounter utterance-end samples=${utterance.size} approxMs=${1000.0 * utterance.size / sampleRate}")
                             onSpeechEnd()
-                            if (!segmentEmitted) {
-                                onUtterance(utterance)
-                            } else {
-                                Log.d(tag, "utterance#$utteranceCounter suppressing utterance-end enqueue because segment already sent")
-                            }
+                            onUtterance(utterance)
                         }
                     }
                 }
@@ -180,10 +157,20 @@ class AudioCapture(
         }
     }
 
-    fun suspendProcessing(durationMs: Long) {
-        val untilMs = System.currentTimeMillis() + durationMs.coerceAtLeast(0L)
-        Log.d(tag, "suspendProcessing durationMs=$durationMs untilMs=$untilMs")
-        suspendedUntilMs.set(untilMs)
+    /** Mute indefinitely — mic loop discards all audio until unmute() is called. */
+    fun mute() {
+        Log.d(tag, "mute")
+        suspendedUntilMs.set(Long.MAX_VALUE)
+        synchronized(bufferLock) {
+            speechBuffer.clear()
+            preRollBuffer.clear()
+        }
+    }
+
+    /** Resume mic processing immediately. */
+    fun unmute() {
+        Log.d(tag, "unmute")
+        suspendedUntilMs.set(0L)
         synchronized(bufferLock) {
             speechBuffer.clear()
             preRollBuffer.clear()

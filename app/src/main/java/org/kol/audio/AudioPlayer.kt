@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -119,6 +120,17 @@ class AudioPlayer {
         hasStarted.set(false)
         isFlushing.set(false)
         isPlaying.set(false)
+    }
+
+    /**
+     * Suspend until the audio queue is empty and AudioTrack has drained.
+     * Returns immediately if nothing is playing.
+     */
+    suspend fun awaitDrained() {
+        while (true) {
+            if (!isPlaying.get() && audioQueue.isEmpty) return
+            delay(IDLE_CHECK_MS)
+        }
     }
 
     fun stop() {
