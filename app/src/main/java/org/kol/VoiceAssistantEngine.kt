@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -68,6 +69,7 @@ class VoiceAssistantEngine(private val context: Context) {
     private var preferredLanguageCode: String? = null
     private val gemmaMutex = Mutex()
     private val ttsMutex = Mutex()
+    private val activeTurn = AtomicBoolean(false)
     private val llmSentenceQueue = Channel<FloatArray>(Channel.UNLIMITED)
     private val ttsSentenceQueue = Channel<TtsQueueItem>(Channel.UNLIMITED)
     private val ttsFeedLock = Any()
@@ -355,13 +357,25 @@ class VoiceAssistantEngine(private val context: Context) {
 
     private fun onUtteranceReady(samples: FloatArray) {
         Log.d(TAG, "onUtteranceReady samples=${samples.size} approxMs=${1000.0 * samples.size / ModelConfig.STT_SAMPLE_RATE}")
-        llmSentenceQueue.trySend(samples)
+        if (!activeTurn.compareAndSet(false, true)) {
+            Log.d(TAG, "Dropping utterance because another turn is already active")
+            return
+        }
+        val result = llmSentenceQueue.trySend(samples)
+        if (result.isFailure) {
+            activeTurn.set(false)
+            Log.w(TAG, "Failed to enqueue utterance for processing")
+        }
     }
 
     private suspend fun drainLlmQueue() {
         for (samples in llmSentenceQueue) {
             Log.d(TAG, "drainLlmQueue received samples=${samples.size}")
-            processUtterance(samples)
+            try {
+                processUtterance(samples)
+            } finally {
+                activeTurn.set(false)
+            }
         }
     }
 
