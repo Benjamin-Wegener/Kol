@@ -1,6 +1,8 @@
 # Gradle build files
 .gradle/
+.kotlin/
 build/
+**/build/
 */*.jar
 */*.aar
 */*.kotlin_module
@@ -22,12 +24,27 @@ Thumbs.db
 # Android Studio
 captures/
 *.log
+*.hprof
 
 # Native code generation
 generated/
+.cxx/
+
+# Bundled native prebuilts kept local
+app/src/main/jniLibs/
 
 # External native build (Android)
 .externalNativeBuild/
+externalNativeBuild/
+
+# Android build outputs / signing artifacts
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.jks
+*.keystore
 
 # Android Profiling / Coverage
 *.profiling
@@ -80,3 +97,4 @@ coverage/
 .cache/
 tmp/
 /kol-single-turn-10-step-plan.md
+app/src/test/

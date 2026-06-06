@@ -1,9 +1,8 @@
-package com.voiceassistant.ui
+package org.kol.ui
 
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.util.TypedValue
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import androidx.core.content.ContextCompat
@@ -16,6 +15,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Represents the chat adapter component.
+ */
 class ChatAdapter : ListAdapter<ChatMessage, ChatAdapter.ChatViewHolder>(Diff) {
     private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
@@ -34,14 +36,13 @@ class ChatAdapter : ListAdapter<ChatMessage, ChatAdapter.ChatViewHolder>(Diff) {
         fun bind(message: ChatMessage) {
             val params = binding.bubbleRoot.layoutParams as FrameLayout.LayoutParams
             params.gravity = if (message.isUser) android.view.Gravity.START else android.view.Gravity.END
-            binding.bubbleRoot.layoutParams = params
 
             val displayMetrics = binding.root.resources.displayMetrics
             val screenWidthPx = displayMetrics.widthPixels
             val bubbleMaxWidthPx = (screenWidthPx * 0.70f).toInt()
-            val bubbleLayoutParams = binding.bubbleRoot.layoutParams
-            bubbleLayoutParams.width = bubbleMaxWidthPx
-            binding.bubbleRoot.layoutParams = bubbleLayoutParams
+            params.width = bubbleMaxWidthPx
+            binding.bubbleRoot.layoutParams = params
+
             binding.tvMessage.maxWidth = bubbleMaxWidthPx - (binding.root.resources.displayMetrics.density * 32f).toInt()
 
             val context = binding.root.context

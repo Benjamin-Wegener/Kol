@@ -1,4 +1,4 @@
-package com.voiceassistant.llm
+package org.kol.llm
 
 import android.content.Context
 import android.util.Log
@@ -14,15 +14,20 @@ import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.SamplerConfig
-import com.voiceassistant.ModelConfig
+import org.kol.ModelConfig
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
+import kotlin.coroutines.resumeWithException
 
+/**
+ * Represents the gemma lite rt inference component.
+ */
 class GemmaLiteRtInference(private val context: Context) {
 
     private val tag = "GemmaLiteRtInference"
@@ -38,9 +43,10 @@ class GemmaLiteRtInference(private val context: Context) {
     private var activeBackendLabel: String = "uninitialized"
     @Volatile
     private var preferredLanguage: String? = null
-    @Volatile
-    private var conversationResetRequested = false
 
+    /**
+     * Handles initialize.
+     */
     suspend fun initialize() = withContext(Dispatchers.IO) {
         if (engine != null && conversation != null) return@withContext
 
@@ -54,7 +60,6 @@ class GemmaLiteRtInference(private val context: Context) {
         for ((label, backend) in backendAttempts) {
             try {
                 enableSpeculativeDecoding()
-                Log.d(tag, "Initializing Gemma LiteRT-LM with backend=$label model=$modelPath threads=$numThreads")
                 val engineConfig = EngineConfig(
                     modelPath = modelPath,
                     backend = backend,
@@ -68,8 +73,6 @@ class GemmaLiteRtInference(private val context: Context) {
                 engine = newEngine
                 conversation = newConversation
                 activeBackendLabel = label
-                Log.d(tag, "Gemma LiteRT-LM initialized with backend=$label: $modelPath")
-                Log.d(tag, "GEMMA SYSTEM PROMPT: ${ModelConfig.systemPromptForLog(preferredLanguage)}")
                 return@withContext
             } catch (throwable: Throwable) {
                 lastError = throwable
@@ -91,127 +94,44 @@ class GemmaLiteRtInference(private val context: Context) {
     @OptIn(ExperimentalApi::class)
     private fun enableSpeculativeDecoding() {
         ExperimentalFlags.enableSpeculativeDecoding = true
-        Log.d(tag, "LiteRT-LM speculative decoding enabled")
-    }
-
-    suspend fun generateFromAudio(
-        audioWavBytes: ByteArray,
-        onToken: (String) -> Unit,
-        onUserText: (String) -> Unit,
-        onDone: () -> Unit,
-        onLanguage: (String) -> Unit = {}
-    ) = withContext(Dispatchers.IO) {
-        cancelRequested.set(false)
-        responseLanguage = "en"
-
-        val rawBuffer = StringBuilder()
-        var emittedVisibleLength = 0
-        var completed = false
-        Log.d(tag, "GEMMA AUDIO INPUT BYTES=${audioWavBytes.size}")
-        Log.d(tag, "GEMMA AUDIO INPUT PROMPT: [audio bytes only; system prompt logged at init]")
-        conversationMutex.withLock {
-            val currentConversation = ensureLiveConversationLocked()
-            if (currentConversation == null) {
-                onDone()
-                return@withLock
-            }
-            suspendCoroutine<Unit> { continuation ->
-                currentConversation.sendMessageAsync(
-                    Contents.of(Content.AudioBytes(audioWavBytes)),
-                    object : MessageCallback {
-                        override fun onMessage(message: Message) {
-                            if (cancelRequested.get() || completed) return
-                            val thought = message.channels["thought"]
-                            if (!thought.isNullOrBlank()) {
-                                Log.d(tag, "Dropping hidden thought channel length=${thought.length}")
-                            }
-                            val chunk = message.toString()
-                            rawBuffer.append(chunk)
-                            Log.d(tag, "RAW GEMMA CHUNK: ${chunk.take(120)}")
-                            Log.d(tag, "RAW GEMMA BUFFER: ${rawBuffer.toString().take(300)}")
-                            val parsed = parseVisibleResponse(rawBuffer.toString())
-                            if (parsed.language != null && parsed.language != responseLanguage) {
-                                responseLanguage = parsed.language
-                                onLanguage(responseLanguage)
-                            }
-                            if (parsed.userText != null) {
-                                Log.d(tag, "RAW GEMMA USER TEXT: ${parsed.userText}")
-                                onUserText(parsed.userText)
-                            }
-                            if (parsed.visibleText.length > emittedVisibleLength) {
-                                val delta = parsed.visibleText.substring(emittedVisibleLength)
-                                emittedVisibleLength = parsed.visibleText.length
-                                if (delta.isNotBlank()) {
-                                    onToken(delta)
-                                }
-                            }
-                        }
-
-                        override fun onDone() {
-                            if (completed) return
-                            completed = true
-                            val parsed = parseVisibleResponse(rawBuffer.toString())
-                            Log.d(tag, "RAW GEMMA FINAL: ${rawBuffer.toString().take(1000)}")
-                            if (parsed.language != null && parsed.language != responseLanguage) {
-                                responseLanguage = parsed.language
-                                onLanguage(responseLanguage)
-                            }
-                            if (parsed.userText != null) {
-                                Log.d(tag, "RAW GEMMA FINAL USER TEXT: ${parsed.userText}")
-                                onUserText(parsed.userText)
-                            }
-                            if (parsed.visibleText.length > emittedVisibleLength) {
-                                val delta = parsed.visibleText.substring(emittedVisibleLength)
-                                emittedVisibleLength = parsed.visibleText.length
-                                if (delta.isNotBlank()) {
-                                    onToken(delta)
-                                }
-                            }
-                            onDone()
-                            Log.d(tag, "RAW LLM FINAL: ${rawBuffer.toString().take(500)}")
-                            continuation.resume(Unit)
-                        }
-
-                        override fun onError(throwable: Throwable) {
-                            if (completed) return
-                            completed = true
-                            Log.e(tag, "Gemma inference failed", throwable)
-                            onDone()
-                            continuation.resume(Unit)
-                        }
-                    },
-                    mapOf("clear_kv_cache_before_prefill" to false)
-                )
-            }
-        }
     }
 
     suspend fun generateFromText(
         prompt: String,
         onToken: (String) -> Unit,
+        inputLanguage: String? = null,
         onLanguage: (String) -> Unit = {}
     ) = withContext(Dispatchers.IO) {
         cancelRequested.set(false)
-        responseLanguage = "en"
+        responseLanguage = inputLanguage ?: preferredLanguage ?: "en"
 
         val rawBuffer = StringBuilder()
         var emittedVisibleLength = 0
         var completed = false
-        Log.d(tag, "GEMMA TEXT PROMPT: $prompt")
-
+        val turnPrompt = ModelConfig.textTurnPrompt(
+            userText = prompt,
+            preferredLanguage = preferredLanguage,
+            detectedLanguage = inputLanguage
+        )
         conversationMutex.withLock {
-            val currentConversation = ensureLiveConversationLocked() ?: return@withLock
-            suspendCoroutine<Unit> { continuation ->
+            val currentConversation = ensureLiveConversationLocked()
+                ?: throw IllegalStateException("Gemma conversation is unavailable")
+            suspendCancellableCoroutine<Unit> { continuation ->
+                continuation.invokeOnCancellation {
+                    cancelRequested.set(true)
+                    currentConversation.cancelProcess()
+                }
                 currentConversation.sendMessageAsync(
-                    Contents.of(Content.Text(prompt)),
+                    Contents.of(Content.Text(turnPrompt)),
                     object : MessageCallback {
                         override fun onMessage(message: Message) {
                             if (cancelRequested.get() || completed) return
+                            val thought = message.channels["thought"]
+                            if (!thought.isNullOrBlank()) {
+                            }
                             val chunk = message.toString()
                             rawBuffer.append(chunk)
-                            Log.d(tag, "RAW GEMMA CHUNK: ${chunk.take(120)}")
                             val parsed = parseVisibleResponse(rawBuffer.toString())
-                            Log.d(tag, "RAW GEMMA BUFFER: ${rawBuffer.toString().take(300)}")
                             if (parsed.language != null && parsed.language != responseLanguage) {
                                 responseLanguage = parsed.language
                                 onLanguage(responseLanguage)
@@ -229,7 +149,6 @@ class GemmaLiteRtInference(private val context: Context) {
                             if (completed) return
                             completed = true
                             val parsed = parseVisibleResponse(rawBuffer.toString())
-                            Log.d(tag, "RAW GEMMA FINAL: ${rawBuffer.toString().take(1000)}")
                             if (parsed.language != null && parsed.language != responseLanguage) {
                                 responseLanguage = parsed.language
                                 onLanguage(responseLanguage)
@@ -241,14 +160,23 @@ class GemmaLiteRtInference(private val context: Context) {
                                     onToken(delta)
                                 }
                             }
-                            continuation.resume(Unit)
+                            if (continuation.isActive) {
+                                continuation.resume(Unit)
+                            }
                         }
 
                         override fun onError(throwable: Throwable) {
                             if (completed) return
                             completed = true
                             Log.e(tag, "Gemma inference failed", throwable)
-                            continuation.resume(Unit)
+                            if (continuation.isActive) {
+                                val failure = if (cancelRequested.get()) {
+                                    CancellationException("Gemma generation cancelled")
+                                } else {
+                                    throwable
+                                }
+                                continuation.resumeWithException(failure)
+                            }
                         }
                     },
                     mapOf("clear_kv_cache_before_prefill" to false)
@@ -257,11 +185,17 @@ class GemmaLiteRtInference(private val context: Context) {
         }
     }
 
+    /**
+     * Handles cancel.
+     */
     fun cancel() {
         cancelRequested.set(true)
         conversation?.cancelProcess()
     }
 
+    /**
+     * Handles clear history.
+     */
     suspend fun clearHistory() = withContext(Dispatchers.IO) {
         conversationMutex.withLock {
             recreateConversationLocked()
@@ -270,14 +204,10 @@ class GemmaLiteRtInference(private val context: Context) {
 
     private fun ensureLiveConversationLocked(): Conversation? {
         val currentConversation = conversation
-        if (!conversationResetRequested && currentConversation != null && currentConversation.isAlive) {
+        if (currentConversation != null && currentConversation.isAlive) {
             return currentConversation
         }
-        if (conversationResetRequested) {
-            Log.d(tag, "Recreating conversation because reset was requested")
-        } else {
-            Log.w(tag, "Recreating conversation because current conversation is not alive")
-        }
+        Log.w(tag, "Recreating conversation because current conversation is not alive")
         return recreateConversationLocked()
     }
 
@@ -288,13 +218,12 @@ class GemmaLiteRtInference(private val context: Context) {
         } catch (_: Exception) { }
         val newConversation = currentEngine.createConversation(conversationConfig())
         conversation = newConversation
-        conversationResetRequested = false
         return newConversation
     }
 
     private fun conversationConfig(): ConversationConfig {
         return ConversationConfig(
-            systemInstruction = Contents.of(ModelConfig.systemPrompt(preferredLanguage)),
+            systemInstruction = Contents.of(ModelConfig.systemPrompt()),
             samplerConfig = SamplerConfig(
                 topK = ModelConfig.GEMMA_TOP_K,
                 topP = ModelConfig.GEMMA_TOP_P.toDouble(),
@@ -303,15 +232,18 @@ class GemmaLiteRtInference(private val context: Context) {
         )
     }
 
+    /**
+     * Handles set preferred language.
+     * @param languageCode TODO(me 5): document this parameter.
+     */
     fun setPreferredLanguage(languageCode: String?) {
         val normalized = languageCode?.takeIf { it.isNotBlank() && it != "default" && it != "auto" }
-        if (preferredLanguage == normalized) return
         preferredLanguage = normalized
-        if (engine != null) {
-            conversationResetRequested = true
-        }
     }
 
+    /**
+     * Handles release.
+     */
     fun release() {
         try {
             conversation?.close()
@@ -323,7 +255,15 @@ class GemmaLiteRtInference(private val context: Context) {
         engine = null
     }
 
+    /**
+     * Returns backend.
+     * @return backend result.
+     */
     fun backend(): String = activeBackendLabel
+    /**
+     * Returns last response language.
+     * @return last response language result.
+     */
     fun lastResponseLanguage(): String = responseLanguage
 
     private data class ParsedResponse(
@@ -374,8 +314,12 @@ class GemmaLiteRtInference(private val context: Context) {
             afterUser.startsWith("[lang") -> ""
             else -> afterUser
         }
-        val visible = stripLeadingBracketNoise(visibleCandidate)
-        return ParsedResponse(userText, language, visible, waitingForPrefixCompletion)
+        return ParsedResponse(
+            userText = userText,
+            language = language,
+            visibleText = stripLeadingBracketNoise(visibleCandidate),
+            waitingForPrefixCompletion = waitingForPrefixCompletion
+        )
     }
 
     private fun stripLeadingBracketNoise(text: String): String {

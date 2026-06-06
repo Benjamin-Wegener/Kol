@@ -1,11 +1,11 @@
-package com.voiceassistant.ui
+package org.kol.ui
 
 import android.content.Context
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.voiceassistant.VoiceAssistantEngine
-import com.voiceassistant.ui.ChatMessage
+import org.kol.VoiceAssistantEngine
+import org.kol.ui.ChatMessage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -15,8 +15,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * Represents the main view model component.
+ */
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
+    /**
+     * Describes voice option values.
+     */
     data class VoiceOption(
         val id: Int,
         val code: String,
@@ -24,6 +30,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val meaning: String
     )
 
+    /**
+     * Describes tts quality option values.
+     */
     data class TtsQualityOption(
         val steps: Int,
         val label: String,
@@ -72,6 +81,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         loadTtsSteps(getApplication())
     }
 
+    /**
+     * Handles start.
+     */
     fun start() {
         viewModelScope.launch(Dispatchers.IO) {
             engine.setPreferredLanguage(AppSettings.getLanguage(getApplication()))
@@ -79,31 +91,66 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Sets language.
+     * @param language Supplies the language value.
+     */
     fun setLanguage(language: String?) {
         AppSettings.setLanguage(getApplication(), language)
         engine.setPreferredLanguage(language)
     }
 
+    /**
+     * Returns current language.
+     * @return The current language result.
+     */
     fun currentLanguage(): String? = AppSettings.getLanguage(getApplication())
 
+    /**
+     * Handles cycle voice.
+     * @param context Supplies the context value.
+     */
     fun cycleVoice(context: Context) {
         selectVoice(context, (_voiceId.value + 1) % 10)
     }
 
+    /**
+     * Loads voice id.
+     * @param context Supplies the context value.
+     */
     fun loadVoiceId(context: Context) {
         _voiceId.value = AppSettings.getVoiceId(context)
     }
 
+    /**
+     * Loads tts steps.
+     * @param context Supplies the context value.
+     */
     fun loadTtsSteps(context: Context) {
         _ttsSteps.value = AppSettings.getTtsSteps(context)
     }
 
+    /**
+     * Returns voice badge.
+     * @param id Supplies the id value.
+     * @return The voice badge result.
+     */
     fun voiceBadge(id: Int): String =
         voiceOption(id).emoji
 
+    /**
+     * Returns voice meaning.
+     * @param id Supplies the id value.
+     * @return The voice meaning result.
+     */
     fun voiceMeaning(id: Int): String =
         voiceOption(id).meaning
 
+    /**
+     * Returns tts quality label.
+     * @param steps Supplies the steps value.
+     * @return The tts quality label result.
+     */
     fun ttsQualityLabel(steps: Int): String =
         when (steps) {
             8 -> "⚡ 8"
@@ -112,15 +159,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             else -> "${steps}"
         }
 
+    /**
+     * Returns tts quality meaning.
+     * @param steps Supplies the steps value.
+     * @return The tts quality meaning result.
+     */
     fun ttsQualityMeaning(steps: Int): String =
         ttsQualityOptions().firstOrNull { it.steps == steps }?.meaning ?: "TTS quality"
 
+    /**
+     * Returns tts quality options.
+     * @return The tts quality options result.
+     */
     fun ttsQualityOptions(): List<TtsQualityOption> = listOf(
         TtsQualityOption(8, "⚡ Fast", "Faster output, a little rougher"),
         TtsQualityOption(16, "🎚 Balanced", "Good quality and reasonable speed"),
         TtsQualityOption(24, "✨ High", "Cleaner speech, slower synthesis")
     )
 
+    /**
+     * Handles select tts quality.
+     * @param context Supplies the context value.
+     * @param steps Supplies the steps value.
+     */
     fun selectTtsQuality(context: Context, steps: Int) {
         val normalized = when (steps) {
             8, 16, 24 -> steps
@@ -130,6 +191,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         AppSettings.setTtsSteps(context, normalized)
     }
 
+    /**
+     * Returns voice option.
+     * @param id Supplies the id value.
+     * @return The voice option result.
+     */
     fun voiceOption(id: Int): VoiceOption = when (id.coerceIn(0, 9)) {
         0 -> VoiceOption(0, "F1", "👩", "Calm, slightly low tone, composed")
         1 -> VoiceOption(1, "F2", "👧", "Bright, cheerful, playful, youthful")
@@ -143,6 +209,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         else -> VoiceOption(9, "M5", "👴", "Warm, soft-spoken, storytelling quality")
     }
 
+    /**
+     * Returns voice options.
+     * @return The voice options result.
+     */
     fun voiceOptions(): List<VoiceOption> = listOf(
         voiceOption(0),
         voiceOption(1),
@@ -156,6 +226,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         voiceOption(9)
     )
 
+    /**
+     * Handles select voice.
+     * @param context Supplies the context value.
+     * @param id Supplies the id value.
+     */
     fun selectVoice(context: Context, id: Int) {
         val normalized = id.coerceIn(0, 9)
         _voiceId.value = normalized
@@ -167,6 +242,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Handles clear history.
+     */
     fun clearHistory() {
         engine.clearHistory()
         _chatMessages.value = emptyList()
@@ -177,6 +255,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         saveConversation(record, immediate = true)
     }
 
+    /**
+     * Handles record user message.
+     * @param text Supplies the text value.
+     */
     fun recordUserMessage(text: String) {
         if (text.isBlank() || text == lastUserText) return
         lastUserText = text
@@ -190,6 +272,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         saveConversation(currentRecord(updated))
     }
 
+    /**
+     * Updates assistant message.
+     * @param text Supplies the text value.
+     */
     fun updateAssistantMessage(text: String) {
         if (text.isBlank()) return
         lastAssistantText = text
@@ -214,6 +300,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         saveConversation(currentRecord(current))
     }
 
+    /**
+     * Handles finish assistant message.
+     */
     fun finishAssistantMessage() {
         val current = _chatMessages.value.toMutableList()
         val existingIndex = activeAssistantMessageId?.let { id ->
@@ -228,6 +317,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         activeAssistantMessageId = null
     }
 
+    /**
+     * Handles select conversation.
+     * @param conversationId Supplies the conversation id value.
+     */
     fun selectConversation(conversationId: String) {
         val meta = _conversations.value.firstOrNull { it.id == conversationId } ?: return
         activeConversationId = meta.id
@@ -238,11 +331,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         syncIdsFromMessages(messages)
     }
 
+    /**
+     * Returns conversation titles.
+     * @return The conversation titles result.
+     */
     fun conversationTitles(): List<Pair<String, String>> =
         _conversations.value.map { it.id to it.title }
 
+    /**
+     * Returns engine get gemma provider.
+     * @return The engine get gemma provider result.
+     */
     fun engineGetGemmaProvider(): String = engine.gemmaProvider()
+    /**
+     * Returns engine get stt provider.
+     * @return The engine get stt provider result.
+     */
+    fun engineGetSttProvider(): String = engine.sttProvider()
+    /**
+     * Returns engine get vad provider.
+     * @return The engine get vad provider result.
+     */
     fun engineGetVadProvider(): String = engine.vadProvider()
+    /**
+     * Returns engine get tts provider.
+     * @return The engine get tts provider result.
+     */
     fun engineGetTtsProvider(): String = engine.ttsProvider()
 
     override fun onCleared() {

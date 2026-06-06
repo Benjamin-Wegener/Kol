@@ -1,5 +1,8 @@
-package com.voiceassistant.ui
+package org.kol.ui
 
+/**
+ * Describes chat message values.
+ */
 data class ChatMessage(
     val id: Long,
     val isUser: Boolean,

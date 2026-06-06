@@ -1,4 +1,4 @@
-package com.voiceassistant.audio
+package org.kol.audio
 
 import android.annotation.SuppressLint
 import android.media.AudioFormat
@@ -6,8 +6,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
-import android.util.Log
-import com.voiceassistant.ModelConfig
+import org.kol.ModelConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -58,6 +57,9 @@ class AudioCapture(
     private var utteranceCounter = 0L
 
     @SuppressLint("MissingPermission")
+    /**
+     * Handles start.
+     */
     fun start() {
         if (isRunning.getAndSet(true)) return
 
@@ -121,7 +123,6 @@ class AudioCapture(
                     isSpeech && !inSpeech -> {
                         // Speech started — prepend pre-roll
                         utteranceCounter += 1
-                        Log.d(tag, "utterance#$utteranceCounter speech-start read=$read preRoll=${preRollBuffer.size} chunkMs=${1000.0 * read / sampleRate}")
                         inSpeech = true
                         silenceFrames = 0
                         segmentEmitted = false
@@ -150,7 +151,6 @@ class AudioCapture(
                                 speechBuffer.map { it / 32768f }.toFloatArray()
                             }
                             if (segment.isNotEmpty()) {
-                                Log.d(tag, "utterance#$utteranceCounter segment-ready samples=${segment.size} approxMs=${1000.0 * segment.size / sampleRate}")
                                 onUtteranceSegment(segment)
                             }
                         }
@@ -163,7 +163,6 @@ class AudioCapture(
                                 speechBuffer.clear()
                                 res
                             }
-                            Log.d(tag, "utterance#$utteranceCounter utterance-end samples=${utterance.size} approxMs=${1000.0 * utterance.size / sampleRate}")
                             onSpeechEnd()
                             onUtterance(utterance)
                         }
@@ -173,9 +172,12 @@ class AudioCapture(
         }
     }
 
+    /**
+     * Handles suspend processing.
+     * @param durationMs Supplies the duration ms value.
+     */
     fun suspendProcessing(durationMs: Long) {
         val untilMs = System.currentTimeMillis() + durationMs.coerceAtLeast(0L)
-        Log.d(tag, "suspendProcessing durationMs=$durationMs untilMs=$untilMs")
         suspendedUntilMs.set(untilMs)
         synchronized(bufferLock) {
             speechBuffer.clear()
@@ -183,8 +185,10 @@ class AudioCapture(
         }
     }
 
+    /**
+     * Handles stop.
+     */
     fun stop() {
-        Log.d(tag, "stop")
         isRunning.set(false)
         captureJob?.cancel()
         audioRecord?.stop()

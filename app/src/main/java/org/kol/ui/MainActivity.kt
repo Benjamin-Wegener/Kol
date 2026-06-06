@@ -1,4 +1,4 @@
-package com.voiceassistant.ui
+package org.kol.ui
 
 import android.Manifest
 import android.app.ActivityManager
@@ -18,16 +18,19 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.GravityCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.lifecycle.lifecycleScope
-import com.voiceassistant.ModelConfig
+import org.kol.ModelConfig
 import com.voiceassistant.R
-import com.voiceassistant.ai.RuntimeProviders
-import com.voiceassistant.VoiceAssistantEngine
+import org.kol.ai.RuntimeProviders
+import org.kol.VoiceAssistantEngine
 import com.voiceassistant.databinding.ActivityMainBinding
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.io.RandomAccessFile
 import kotlin.math.roundToInt
 
+/**
+ * Represents the main activity component.
+ */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
@@ -218,9 +221,11 @@ class MainActivity : AppCompatActivity() {
         val cpuUsage = readCpuUsage()
 
         val llmProvider = (vm.engineGetGemmaProvider())
+        val sttProvider = (vm.engineGetSttProvider())
         val vadProvider = (vm.engineGetVadProvider())
         val ttsProvider = (vm.engineGetTtsProvider())
         val gpuStatus = "Gemma ${RuntimeProviders.providerLabel(llmProvider)} / " +
+            "Whisper ${RuntimeProviders.providerLabel(sttProvider)} / " +
             "VAD ${RuntimeProviders.providerLabel(vadProvider)} / " +
             "TTS ${RuntimeProviders.providerLabel(ttsProvider)}"
 

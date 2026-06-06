@@ -1,4 +1,4 @@
-package com.voiceassistant.ui
+package org.kol.ui
 
 import android.content.Intent
 import android.os.Bundle
@@ -8,13 +8,16 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.voiceassistant.ModelDownloader
-import com.voiceassistant.ModelDownloader.FileState
+import org.kol.ModelDownloader
+import org.kol.ModelDownloader.FileState
 import com.voiceassistant.R
 import com.voiceassistant.databinding.ActivitySetupBinding
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
+/**
+ * Represents the setup activity component.
+ */
 class SetupActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivitySetupBinding

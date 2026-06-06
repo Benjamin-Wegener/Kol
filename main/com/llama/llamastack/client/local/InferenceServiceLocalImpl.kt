@@ -18,6 +18,9 @@ import com.llama.llamastack.models.InferenceEmbeddingsParams
 import com.llama.llamastack.services.blocking.InferenceService
 import org.pytorch.executorch.LlamaCallback
 
+/**
+ * Represents the inference service local impl component.
+ */
 class InferenceServiceLocalImpl
 constructor(
     private val clientOptions: LocalClientOptions,
@@ -175,6 +178,9 @@ constructor(
         TODO("Not yet implemented")
     }
 
+    /**
+     * Handles clear elements.
+     */
     fun clearElements() {
         resultMessage = ""
         stopToken = ""

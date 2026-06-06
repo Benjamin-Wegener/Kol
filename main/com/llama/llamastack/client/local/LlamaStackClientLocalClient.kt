@@ -2,12 +2,18 @@ package com.llama.llamastack.client.local
 
 import com.llama.llamastack.client.LlamaStackClientClient
 
+/**
+ * Represents the llama stack client local client component.
+ */
 class LlamaStackClientLocalClient private constructor() {
 
     companion object {
         fun builder() = Builder()
     }
 
+    /**
+     * Represents the builder component.
+     */
     class Builder {
 
         private var clientOptions: LocalClientOptions.Builder = LocalClientOptions.builder()

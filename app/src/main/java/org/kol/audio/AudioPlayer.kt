@@ -1,11 +1,11 @@
-package com.voiceassistant.audio
+package org.kol.audio
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.util.Log
-import com.voiceassistant.ModelConfig
+import org.kol.ModelConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -36,6 +36,9 @@ class AudioPlayer {
 
     private val scope = CoroutineScope(Dispatchers.IO)
 
+    /**
+     * Handles start.
+     */
     fun start() {
         val bufferSize = AudioTrack.getMinBufferSize(
             sampleRate,
@@ -62,7 +65,6 @@ class AudioPlayer {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
 
-        Log.d(tag, "AudioTrack created")
 
         playJob = scope.launch {
             while (isActive) {
@@ -88,7 +90,6 @@ class AudioPlayer {
                         playbackHeadAtStart = audioTrack?.playbackHeadPosition?.toLong() ?: 0L
                         audioTrack?.play()
                         hasStarted.set(true)
-                        Log.d(tag, "AudioTrack started after preroll frames=$framesBufferedBeforeStart")
                     }
                 }
             }
@@ -121,10 +122,12 @@ class AudioPlayer {
         isPlaying.set(false)
     }
 
+    /**
+     * Handles stop.
+     */
     fun stop() {
         playJob?.cancel()
         audioTrack?.let {
-            Log.d(tag, "Stopping AudioTrack")
             it.stop()
             it.release()
         }
@@ -156,7 +159,6 @@ class AudioPlayer {
             totalFramesWritten = 0L
             playbackHeadAtStart = 0L
             isPlaying.set(false)
-            Log.d(tag, "AudioTrack paused after drain")
         }
     }
 

@@ -5,6 +5,9 @@ import com.llama.llamastack.models.Message
 import com.llama.llamastack.models.SystemMessage
 import com.llama.llamastack.models.UserMessage
 
+/**
+ * Holds prompt format local helpers and state.
+ */
 object PromptFormatLocal {
     private const val SYSTEM_PLACEHOLDER: String = "{{ system_prompt }}"
     private const val USER_PLACEHOLDER: String = "{{ user_prompt }}"
@@ -40,6 +43,11 @@ object PromptFormatLocal {
         }
     }
 
+    /**
+     * Returns stop tokens.
+     * @param modelName Supplies the model name value.
+     * @return The get stop tokens result.
+     */
     fun getStopTokens(modelName: String?): List<String> {
         return when (modelName) {
             "LLAMA_3",
@@ -50,6 +58,12 @@ object PromptFormatLocal {
         }
     }
 
+    /**
+     * Returns total formatted prompt.
+     * @param messages Supplies the messages value.
+     * @param modelName Supplies the model name value.
+     * @return The get total formatted prompt result.
+     */
     fun getTotalFormattedPrompt(messages: List<Message>, modelName: String?): String {
         var formattedPrompt: String = ""
         if (messages.isEmpty()) return formattedPrompt

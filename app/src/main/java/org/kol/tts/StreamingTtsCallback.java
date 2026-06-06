@@ -1,10 +1,13 @@
-package com.voiceassistant.tts;
+package org.kol.tts;
 
 import android.util.Log;
 
 import kotlin.jvm.functions.Function1;
 
 public final class StreamingTtsCallback implements Function1<float[], Integer> {
+    /**
+     * Defines the contract for listener.
+     */
     public interface Listener {
         boolean onSamples(float[] samples);
     }
@@ -29,7 +32,6 @@ public final class StreamingTtsCallback implements Function1<float[], Integer> {
         }
         if (!sawFirstChunk) {
             sawFirstChunk = true;
-            Log.d(tag, "First streaming TTS chunk in " + (System.currentTimeMillis() - startedAtMs) + "ms samples=" + samples.length);
         }
         callbackChunks++;
         callbackSamples += samples.length;

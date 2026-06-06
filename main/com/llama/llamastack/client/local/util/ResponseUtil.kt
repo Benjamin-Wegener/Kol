@@ -116,10 +116,20 @@ fun buildInferenceChatCompletionResponseForStringStream(
         .build()
 }
 
+/**
+ * Returns whether response atool call.
+ * @param response Supplies the response value.
+ * @return The is response atool call result.
+ */
 fun isResponseAToolCall(response: String): Boolean {
     return response.startsWith("[") && response.endsWith("]")
 }
 
+/**
+ * Creates custom tool calls.
+ * @param response Supplies the response value.
+ * @return The create custom tool calls result.
+ */
 fun createCustomToolCalls(response: String): List<ToolCall> {
     val toolCalls: MutableList<ToolCall> = mutableListOf()
 
@@ -153,6 +163,11 @@ fun createCustomToolCalls(response: String): List<ToolCall> {
     return toolCalls.toList()
 }
 
+/**
+ * Returns map stop token to reason.
+ * @param stopToken Supplies the stop token value.
+ * @return The map stop token to reason result.
+ */
 fun mapStopTokenToReason(stopToken: String): CompletionMessage.StopReason =
     when (stopToken) {
         "<|eot_id|>" -> CompletionMessage.StopReason.END_OF_TURN

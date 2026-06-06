@@ -1,7 +1,6 @@
-package com.voiceassistant.llm
+package org.kol.llm
 
-import android.util.Log
-import com.voiceassistant.ModelConfig
+import org.kol.ModelConfig
 
 /**
  * Accumulates streamed LLM tokens and flushes complete sentences to TTS.
@@ -51,11 +50,14 @@ class SentenceBatcher(
     private var pendingFlush = false
     private var hasFlushed = false
 
+    /**
+     * Handles add token.
+     * @param token Supplies the token value.
+     */
     fun addToken(token: String) {
         buffer.append(token)
         fullResponse.append(token)
         tokenCount++
-        Log.d(tag, "addToken token=${token.take(80)} tokenCount=$tokenCount bufferChars=${buffer.length}")
 
         val tokenEndsBoundary = token.isNotBlank() && (
             token.last() in ModelConfig.SENTENCE_ENDINGS ||
@@ -74,7 +76,6 @@ class SentenceBatcher(
                 && tokenEndsBoundary)
 
         if (shouldFlush) {
-            Log.d(tag, "flushing sentence chars=${buffer.length} fullChars=${fullResponse.length}")
             flush()
             pendingFlush = false
             return
@@ -86,13 +87,11 @@ class SentenceBatcher(
             pendingFlush = true
         }
         if (pendingFlush && tokenEndsBoundary && buffer.length >= earlyFlushHardCap) {
-            Log.d(tag, "pending flush resolved chars=${buffer.length} fullChars=${fullResponse.length}")
             flush()
             pendingFlush = false
             return
         }
         if (buffer.length >= absoluteHardCap && tokenEndsBoundary) {
-            Log.d(tag, "absolute cap flush chars=${buffer.length} fullChars=${fullResponse.length}")
             flush()
             pendingFlush = false
         }
@@ -101,7 +100,6 @@ class SentenceBatcher(
     /** Call when LLM generation is done — flushes remaining text */
     fun done() {
         if (buffer.isNotBlank()) {
-            Log.d(tag, "done() flushing tail chars=${buffer.length}")
             flush()
         }
     }
@@ -111,7 +109,6 @@ class SentenceBatcher(
         // sentenceStart tracks where the current sentence begins in fullResponse.
         val sentence = fullResponse.substring(sentenceStart).trim()
         if (sentence.isNotEmpty() && sentence.any { it.isLetterOrDigit() }) {
-            Log.d(tag, "sentenceReady=${sentence.take(120)}")
             onSentenceReady(sentence)
             hasFlushed = true
         }
@@ -121,6 +118,9 @@ class SentenceBatcher(
         tokenCount = 0
     }
 
+    /**
+     * Handles reset.
+     */
     fun reset() {
         buffer.clear()
         fullResponse.clear()
@@ -130,5 +130,9 @@ class SentenceBatcher(
         hasFlushed = false
     }
 
+    /**
+     * Returns full response.
+     * @return The get full response result.
+     */
     fun getFullResponse(): String = fullResponse.toString().trim()
 }

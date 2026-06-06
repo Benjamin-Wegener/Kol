@@ -1,10 +1,13 @@
-package com.voiceassistant.ui
+package org.kol.ui
 
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
+/**
+ * Describes conversation record values.
+ */
 data class ConversationRecord(
     val id: String,
     val title: String,
@@ -12,11 +15,18 @@ data class ConversationRecord(
     val lastUpdated: Long = System.currentTimeMillis()
 )
 
+/**
+ * Represents the conversation store component.
+ */
 class ConversationStore(context: Context) {
     private val conversationsDir = File(context.filesDir, "conversations").apply { mkdirs() }
     private val indexFile = File(conversationsDir, "index.json")
     private val legacyFile = File(context.filesDir, "conversations.json")
 
+    /**
+     * Loads index.
+     * @return The load index result.
+     */
     fun loadIndex(): List<ConversationRecord> {
         migrateLegacyStoreIfNeeded()
         if (!indexFile.exists()) return emptyList()
@@ -30,6 +40,11 @@ class ConversationStore(context: Context) {
         }
     }
 
+    /**
+     * Loads conversation.
+     * @param conversationId Supplies the conversation id value.
+     * @return The load conversation result.
+     */
     fun loadConversation(conversationId: String): ConversationRecord? {
         migrateLegacyStoreIfNeeded()
         val file = conversationFile(conversationId)
@@ -39,16 +54,28 @@ class ConversationStore(context: Context) {
         }
     }
 
+    /**
+     * Saves conversation.
+     * @param record Supplies the record value.
+     */
     fun saveConversation(record: ConversationRecord) {
         saveIndex(upsertIndex(record))
         conversationFile(record.id).writeText(record.toJson().toString())
     }
 
+    /**
+     * Handles delete conversation.
+     * @param conversationId Supplies the conversation id value.
+     */
     fun deleteConversation(conversationId: String) {
         conversationFile(conversationId).delete()
         saveIndex(loadIndex().filterNot { it.id == conversationId })
     }
 
+    /**
+     * Saves index.
+     * @param records Supplies the records value.
+     */
     fun saveIndex(records: List<ConversationRecord>) {
         val array = JSONArray()
         records.forEach { record ->

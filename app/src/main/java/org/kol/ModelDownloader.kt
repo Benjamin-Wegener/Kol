@@ -1,4 +1,4 @@
-package com.voiceassistant
+package org.kol
 
 import android.content.Context
 import android.util.Log
@@ -7,14 +7,21 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 
+/**
+ * Represents the model downloader component.
+ */
 class ModelDownloader(private val context: Context) {
 
     enum class FileState { PENDING, DOWNLOADING, DONE, SKIPPED, ERROR }
 
+    /**
+     * Describes file progress values.
+     */
     data class FileProgress(
         val fileName: String,
         val state: FileState = FileState.PENDING,
@@ -27,6 +34,9 @@ class ModelDownloader(private val context: Context) {
         val totalMB: Float get() = total / 1_048_576f
     }
 
+    /**
+     * Describes overall progress values.
+     */
     data class OverallProgress(
         val files: List<FileProgress>,
         val totalBytesDownloaded: Long,   // across all files this session
@@ -74,6 +84,9 @@ class ModelDownloader(private val context: Context) {
     val progress: StateFlow<OverallProgress> = _progress
 
     // Legacy single-file flow kept for compatibility
+    /**
+     * Describes progress values.
+     */
     data class Progress(
         val fileName: String,
         val downloaded: Long,
@@ -84,10 +97,18 @@ class ModelDownloader(private val context: Context) {
         val percent: Int get() = if (total > 0) ((downloaded * 100) / total).toInt() else 0
     }
 
+    /**
+     * Downloads core.
+     * @return download core result.
+     */
     suspend fun downloadCore(): Boolean = withContext(Dispatchers.IO) {
         downloadFiles(ModelConfig.DOWNLOAD_URLS.entries.toList())
     }
 
+    /**
+     * Downloads all.
+     * @return download all result.
+     */
     suspend fun downloadAll(): Boolean = withContext(Dispatchers.IO) {
         downloadFiles(ModelConfig.DOWNLOAD_URLS.entries.toList())
     }
@@ -102,17 +123,17 @@ class ModelDownloader(private val context: Context) {
         val toDownload = mutableListOf<Pair<String, String>>() // fileName -> url
         for ((fileName, url) in urls) {
             val file = ModelConfig.modelFile(context, fileName)
-            if (fileName == ModelConfig.SUPERTONIC_ARCHIVE) {
-                val supertonicDir = File(ModelConfig.modelsDir(context), ModelConfig.SUPERTONIC_DIR)
-                if (supertonicDir.resolve("duration_predictor.int8.onnx").exists() &&
-                    supertonicDir.resolve("text_encoder.int8.onnx").exists() &&
-                    supertonicDir.resolve("vector_estimator.int8.onnx").exists() &&
-                    supertonicDir.resolve("vocoder.int8.onnx").exists() &&
-                    supertonicDir.resolve("tts.json").exists() &&
-                    supertonicDir.resolve("unicode_indexer.bin").exists() &&
-                    supertonicDir.resolve("voice.bin").exists()
-                ) {
-                    Log.d(TAG, "Skipping Supertonic archive; extracted files already present at ${supertonicDir.absolutePath}")
+            if (archiveAlreadyExtracted(fileName)) {
+                val idx = fileStates.indexOfFirst { it.fileName == fileName }
+                if (idx >= 0) fileStates[idx] = fileStates[idx].copy(
+                    state = FileState.SKIPPED,
+                    downloaded = file.length(),
+                    total = file.length()
+                )
+                continue
+            }
+            if (isModelArchive(fileName) && file.exists() && file.length() > 1024) {
+                if (extractModelArchive(fileName, file)) {
                     val idx = fileStates.indexOfFirst { it.fileName == fileName }
                     if (idx >= 0) fileStates[idx] = fileStates[idx].copy(
                         state = FileState.SKIPPED,
@@ -121,6 +142,8 @@ class ModelDownloader(private val context: Context) {
                     )
                     continue
                 }
+                Log.w(TAG, "Cached archive $fileName is invalid; downloading it again")
+                file.delete()
             }
             if (file.exists() && file.length() > 1024) {
                 val idx = fileStates.indexOfFirst { it.fileName == fileName }
@@ -163,6 +186,7 @@ class ModelDownloader(private val context: Context) {
         for ((fileName, url) in toDownload) {
             val file = ModelConfig.modelFile(context, fileName)
             val idx = fileStates.indexOfFirst { it.fileName == fileName }
+            file.parentFile?.mkdirs()
 
             fileStates[idx] = fileStates[idx].copy(state = FileState.DOWNLOADING)
             _progress.value = _progress.value.copy(
@@ -205,15 +229,15 @@ class ModelDownloader(private val context: Context) {
                     downloaded = file.length(),
                     total = file.length()
                 )
-                if (fileName == ModelConfig.SUPERTONIC_ARCHIVE) {
-                    if (!extractSupertonicArchive(file)) {
+                if (isModelArchive(fileName)) {
+                    if (!extractModelArchive(fileName, file)) {
                         fileStates[idx] = fileStates[idx].copy(
                             state = FileState.ERROR,
-                            error = "Failed to unpack multilingual TTS archive"
+                            error = "Failed to unpack $fileName"
                         )
                         _progress.value = _progress.value.copy(
                             files = fileStates.toList(),
-                            error = "Failed to unpack multilingual TTS archive"
+                            error = "Failed to unpack $fileName"
                         )
                         return false
                     }
@@ -249,6 +273,7 @@ class ModelDownloader(private val context: Context) {
         onProgress: (Long, Long) -> Unit
     ): Boolean {
         return try {
+            dest.parentFile?.mkdirs()
             val tmp = File(dest.parent, "${dest.name}.tmp")
             val existingBytes = if (tmp.exists()) tmp.length() else 0L
 
@@ -257,11 +282,15 @@ class ModelDownloader(private val context: Context) {
             conn.readTimeout = 60_000
             if (existingBytes > 0L) {
                 conn.setRequestProperty("Range", "bytes=$existingBytes-")
-                Log.d(TAG, "Resuming $name from byte $existingBytes")
             }
             conn.connect()
 
             val responseCode = conn.responseCode
+            if (existingBytes > 0L && responseCode != HttpURLConnection.HTTP_PARTIAL) {
+                conn.disconnect()
+                tmp.delete()
+                return downloadFile(url, dest, name, knownTotal, onProgress)
+            }
             val total = when {
                 responseCode == HttpURLConnection.HTTP_PARTIAL -> {
                     val rangeHeader = conn.getHeaderField("Content-Range")
@@ -274,10 +303,7 @@ class ModelDownloader(private val context: Context) {
             var downloaded = existingBytes
 
             conn.inputStream.use { input ->
-                tmp.outputStream().use { output ->
-                    if (existingBytes > 0L) {
-                        output.channel.position(existingBytes)
-                    }
+                FileOutputStream(tmp, existingBytes > 0L).use { output ->
                     val buf = ByteArray(32_768)
                     var n: Int
                     while (input.read(buf).also { n = it } != -1) {
@@ -292,7 +318,6 @@ class ModelDownloader(private val context: Context) {
             if (!tmp.renameTo(dest)) {
                 throw IOException("Failed to move ${tmp.absolutePath} to ${dest.absolutePath}")
             }
-            Log.d(TAG, "Downloaded $name (${"%,.1f".format(downloaded / 1_048_576f)} MB)")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed: $name", e)
@@ -300,37 +325,49 @@ class ModelDownloader(private val context: Context) {
         }
     }
 
-    private fun extractSupertonicArchive(archive: File): Boolean {
+    private fun archiveAlreadyExtracted(fileName: String): Boolean {
+        return when (fileName) {
+            ModelConfig.SUPERTONIC_ARCHIVE -> requiredFilesPresent(
+                ModelConfig.SUPERTONIC_DURATION_PREDICTOR,
+                ModelConfig.SUPERTONIC_TEXT_ENCODER,
+                ModelConfig.SUPERTONIC_VECTOR_ESTIMATOR,
+                ModelConfig.SUPERTONIC_VOCODER,
+                ModelConfig.SUPERTONIC_TTS_JSON,
+                ModelConfig.SUPERTONIC_UNICODE_INDEXER,
+                ModelConfig.SUPERTONIC_VOICE_STYLE
+            )
+            else -> false
+        }
+    }
+
+    private fun isModelArchive(fileName: String): Boolean {
+        return fileName == ModelConfig.SUPERTONIC_ARCHIVE
+    }
+
+    private fun requiredFilesPresent(vararg names: String): Boolean {
+        return names.all { name ->
+            ModelConfig.modelFile(context, name).let { it.exists() && it.length() > 1024 }
+        }
+    }
+
+    private fun extractModelArchive(fileName: String, archive: File): Boolean {
         val targetDir = ModelConfig.modelsDir(context)
-        val supertonicDir = targetDir.resolve(ModelConfig.SUPERTONIC_DIR)
-        if (supertonicDir.resolve("duration_predictor.int8.onnx").exists() &&
-            supertonicDir.resolve("text_encoder.int8.onnx").exists() &&
-            supertonicDir.resolve("vector_estimator.int8.onnx").exists() &&
-            supertonicDir.resolve("vocoder.int8.onnx").exists() &&
-            supertonicDir.resolve("tts.json").exists() &&
-            supertonicDir.resolve("unicode_indexer.bin").exists() &&
-            supertonicDir.resolve("voice.bin").exists()
-        ) {
-            Log.d(TAG, "Supertonic archive already extracted at ${supertonicDir.absolutePath}")
+        if (archiveAlreadyExtracted(fileName)) {
             return true
         }
 
         val command = listOf("tar", "-xjf", archive.absolutePath, "-C", targetDir.absolutePath)
         return try {
-            Log.d(TAG, "Extracting Supertonic archive ${archive.absolutePath} -> ${targetDir.absolutePath}")
             val process = ProcessBuilder(command)
                 .redirectErrorStream(true)
                 .start()
             val exitCode = process.waitFor()
             if (exitCode != 0) {
-                Log.e(TAG, "Failed to extract multilingual TTS archive, exitCode=$exitCode")
+                Log.e(TAG, "Failed to extract $fileName, exitCode=$exitCode")
                 false
             } else {
-                Log.d(
-                    TAG,
-                    "Extracted Supertonic archive; duration=${describeFile(supertonicDir.resolve("duration_predictor.int8.onnx"))} textEncoder=${describeFile(supertonicDir.resolve("text_encoder.int8.onnx"))} vector=${describeFile(supertonicDir.resolve("vector_estimator.int8.onnx"))} vocoder=${describeFile(supertonicDir.resolve("vocoder.int8.onnx"))} ttsJson=${describeFile(supertonicDir.resolve("tts.json"))} unicode=${describeFile(supertonicDir.resolve("unicode_indexer.bin"))} voice=${describeFile(supertonicDir.resolve("voice.bin"))}"
-                )
-                true
+                val valid = archiveAlreadyExtracted(fileName)
+                valid
             }
         } catch (e: IOException) {
             Log.e(TAG, "Multilingual TTS extraction unavailable", e)
@@ -349,5 +386,9 @@ class ModelDownloader(private val context: Context) {
         }
     }
 
-    fun totalSizeMB(): String = "~650 MB"
+    /**
+     * Returns total size mb.
+     * @return total size mb result.
+     */
+    fun totalSizeMB(): String = "~3.3 GB"
 }

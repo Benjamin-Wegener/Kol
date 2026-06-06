@@ -1,4 +1,4 @@
-package com.voiceassistant.tts
+package org.kol.tts
 
 import android.content.Context
 import android.util.Log
@@ -9,8 +9,8 @@ import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsSupertonicModelConfig
 import com.k2fsa.sherpa.onnx.GenerationConfig
-import com.voiceassistant.ModelConfig
-import com.voiceassistant.ai.RuntimeProviders
+import org.kol.ModelConfig
+import org.kol.ai.RuntimeProviders
 import kotlin.math.abs
 
 /**
@@ -34,18 +34,6 @@ class MultilingualTTS(context: Context) {
     )
 
     init {
-        val durationPredictorFile = File(modelsDir, ModelConfig.SUPERTONIC_DURATION_PREDICTOR)
-        val textEncoderFile = File(modelsDir, ModelConfig.SUPERTONIC_TEXT_ENCODER)
-        val vectorEstimatorFile = File(modelsDir, ModelConfig.SUPERTONIC_VECTOR_ESTIMATOR)
-        val vocoderFile = File(modelsDir, ModelConfig.SUPERTONIC_VOCODER)
-        val ttsJsonFile = File(modelsDir, ModelConfig.SUPERTONIC_TTS_JSON)
-        val unicodeIndexerFile = File(modelsDir, ModelConfig.SUPERTONIC_UNICODE_INDEXER)
-        val voiceStyleFile = File(modelsDir, ModelConfig.SUPERTONIC_VOICE_STYLE)
-        Log.d(
-            TAG,
-            "TTS files duration=${describeFile(durationPredictorFile)} textEncoder=${describeFile(textEncoderFile)} vector=${describeFile(vectorEstimatorFile)} vocoder=${describeFile(vocoderFile)} ttsJson=${describeFile(ttsJsonFile)} unicode=${describeFile(unicodeIndexerFile)} voice=${describeFile(voiceStyleFile)}"
-        )
-
         val ttsModelConfig = OfflineTtsSupertonicModelConfig(
             durationPredictor = "$modelsDir/${ModelConfig.SUPERTONIC_DURATION_PREDICTOR}",
             textEncoder = "$modelsDir/${ModelConfig.SUPERTONIC_TEXT_ENCODER}",
@@ -84,7 +72,7 @@ class MultilingualTTS(context: Context) {
 
         val normalizedLanguage = normalizeLanguage(language)
         if (normalizedLanguage != language) {
-            Log.d(TAG, "Normalized TTS language $language -> $normalizedLanguage")
+            d(TAG, "Language normalized: $language -> $normalizedLanguage")
         }
         val startedAt = System.currentTimeMillis()
         val result = tts.generateWithConfig(
@@ -97,7 +85,6 @@ class MultilingualTTS(context: Context) {
             )
         )
         val samples = result.samples
-        val durationMs = System.currentTimeMillis() - startedAt
         var peak = 0f
         var nonZero = 0
         for (sample in samples) {
@@ -105,10 +92,6 @@ class MultilingualTTS(context: Context) {
             if (magnitude > peak) peak = magnitude
             if (magnitude > 0.0001f) nonZero++
         }
-        Log.d(
-            TAG,
-            "Generated ${samples.size} samples in ${durationMs}ms peak=$peak nonZero=$nonZero sampleRate=${result.sampleRate} lang=$normalizedLanguage sid=$speakerId"
-        )
         return samples
     }
 
@@ -121,7 +104,7 @@ class MultilingualTTS(context: Context) {
 
         val normalizedLanguage = normalizeLanguage(language)
         if (normalizedLanguage != language) {
-            Log.d(TAG, "Normalized TTS language $language -> $normalizedLanguage")
+            d(TAG, "Language normalized: $language -> $normalizedLanguage")
         }
         val startedAt = System.currentTimeMillis()
         val callback = StreamingTtsCallback(TAG, startedAt) { samples ->
@@ -138,21 +121,23 @@ class MultilingualTTS(context: Context) {
             callback = callback
         )
         val durationMs = System.currentTimeMillis() - startedAt
-        Log.d(
-            TAG,
-            "Streaming generated ${result.samples.size} samples in ${durationMs}ms chunks=${callback.callbackChunks} callbackSamples=${callback.callbackSamples} sampleRate=${result.sampleRate} lang=$normalizedLanguage sid=$speakerId"
-        )
         return result.samples
     }
 
     val sampleRate: Int get() = tts.sampleRate()
 
+    /**
+     * Handles warm up.
+     * @param language Supplies the language value.
+     */
     fun warmUp(language: String = "de") {
         val startedAt = System.currentTimeMillis()
         synthesize("Ja.", language)
-        Log.d(TAG, "TTS warm-up completed in ${System.currentTimeMillis() - startedAt}ms")
     }
 
+    /**
+     * Handles release.
+     */
     fun release() {
         tts.release()
     }

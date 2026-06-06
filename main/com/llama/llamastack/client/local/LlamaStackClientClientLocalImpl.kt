@@ -7,6 +7,9 @@ import com.llama.llamastack.client.LlamaStackClientClientAsync
 import com.llama.llamastack.models.*
 import com.llama.llamastack.services.blocking.*
 
+/**
+ * Represents the llama stack client client local impl component.
+ */
 class LlamaStackClientClientLocalImpl
 constructor(
     private val clientOptions: LocalClientOptions,

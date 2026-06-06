@@ -1,4 +1,4 @@
-package com.voiceassistant.llm
+package org.kol.llm
 
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
@@ -18,6 +18,9 @@ object LiteRtNativeLoader {
     private const val TAG = "LiteRtNativeLoader"
     private val loaded = AtomicBoolean(false)
 
+    /**
+     * Handles ensure loaded.
+     */
     fun ensureLoaded() {
         if (loaded.get()) return
         synchronized(this) {
@@ -25,7 +28,6 @@ object LiteRtNativeLoader {
             try {
                 System.loadLibrary("LiteRt")
                 loaded.set(true)
-                Log.d(TAG, "Loaded libLiteRt.so before LiteRT-LM initialization")
             } catch (t: Throwable) {
                 // Best-effort pre-load: libLiteRt.so may already be resident in the
                 // linker namespace (loaded by the AAR's own static initializer on some

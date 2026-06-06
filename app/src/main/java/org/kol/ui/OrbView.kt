@@ -1,4 +1,4 @@
-package com.voiceassistant.ui
+package org.kol.ui
 
 import android.animation.ValueAnimator
 import android.content.Context
@@ -71,6 +71,10 @@ class OrbView @JvmOverloads constructor(
         pulseAnimator.start()
     }
 
+    /**
+     * Sets state.
+     * @param state Supplies the state value.
+     */
     fun setState(state: OrbState) {
         currentState = state
         pulseAnimator.duration = when (state) {

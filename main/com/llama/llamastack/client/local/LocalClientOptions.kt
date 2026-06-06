@@ -5,6 +5,9 @@ package com.llama.llamastack.client.local
 import com.llama.llamastack.errors.LlamaStackClientException
 import org.pytorch.executorch.LlamaModule
 
+/**
+ * Represents the local client options component.
+ */
 class LocalClientOptions
 private constructor(
     val modelPath: String,
@@ -17,6 +20,9 @@ private constructor(
         fun builder() = Builder()
     }
 
+    /**
+     * Represents the builder component.
+     */
     class Builder {
         private var modelPath: String? = null
         private var tokenizerPath: String? = null
